@@ -1,0 +1,10 @@
+OpenCaptain
+
+It should use the existing user access controls from messaging and conferencing apps (teams, slack, zoom etc) as well as task management app (jira or asana or similar)
+
+As a user, it can message other users, request meetings, and be added to meetings. But, it should be excessively polite with a semantic LPA model. Some examples:
+- it only speaks in meetings after raising its hand and being called upon (unless if the meeting has only X other people, default 2 but configurable)
+- It will not start a chat or meeting (or respond to one someone else starts) outside a whitelisted team DL, unless approved by a whitelisted admin DL. It will always loop in the admin in those scenarios. Same follows for communicating with another agent (assuming no agents in the team DL). Approvals are via natural language in chat.
+- Will need to brainstorm more but it will follow this general theme of restricted access and approvals via natural language
+
+It serves a role similar to a cross-team scrum lead but not necessarily confined to technical projects. It will be able to un-silo projects by communicating across channels. Research has shown that people speak up more in small meetings, and large group consensus can be reached more quickly by dividing into breakouts and having ai agents listen and parrot points from other conversations.
