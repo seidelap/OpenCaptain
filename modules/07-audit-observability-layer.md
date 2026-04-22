@@ -251,3 +251,45 @@ PolicyDecisionEntry {
 | `BOUNDARY_CROSSING_SPIKE` | Unusual number of out-of-scope communications | WARN |
 | `SELF_APPROVAL_ATTEMPT` | Agent or non-admin attempted to approve an action | ERROR |
 | `SECURITY_EVENT` | Privilege escalation attempt, impersonation, etc. | ERROR |
+
+---
+
+## 6. Test Plan
+
+### Unit Tests
+
+| Function | Test | Expected |
+|---|---|---|
+| `logEvent()` | Valid entry submitted | Immutable audit log ID returned; entry indexed by actor, action type, target, timestamp |
+| `logEvent()` | Entry missing required field (actor) | Rejected with validation error; no partial write |
+| `logEvent()` | Attempt to modify existing entry | Rejected; original entry unchanged; append-only invariant enforced |
+| `logEvent()` | Entry for boundary crossing | Alert check triggered; BOUNDARY_CROSSING_SPIKE alert fired if threshold exceeded |
+| `logPolicyDecision()` | Full policy evaluation record submitted | Stored separately from general audit log; queryable via `queryAuditLog(log_type: POLICY_DECISION)` |
+| `queryAuditLog()` | Filter by actor_id and time_range | Only matching entries returned; ordered by timestamp |
+| `queryAuditLog()` | `log_type: POLICY_DECISION` | Returns only policy decision entries with full evaluation context in metadata |
+| `queryAuditLog()` | `log_type: ALL` (default) | Returns both general and policy decision entries merged, ordered by timestamp |
+| `getComplianceReport()` | ACTIVITY_SUMMARY for past week | Actions grouped by type and target; counts match audit log entries |
+| `getComplianceReport()` | BOUNDARY_CROSSING report | Only out-of-scope communications listed; authorization chain present for each |
+| `getComplianceReport()` | CONTRADICTION_STATUS report | Queries Knowledge Store for open contradictions; age and scope populated |
+| `detectAnomalies()` | Spike in denial rate within window | `HIGH_DENIAL_RATE` alert fired; anomaly record includes contributing entries |
+| `detectAnomalies()` | No anomalies in window | Empty anomaly list; no alerts fired |
+| `traceAction()` | Audit log ID for dispatched action | Full trace returned: originating event → policy decision → approval chain (if any) → dispatch result |
+| `traceAction()` | Audit log ID for denied action | Trace shows denial reason; no dispatch step present |
+
+### Integration Tests
+
+| Test | Approach |
+|---|---|
+| Policy Engine pushes decision record; queryable via Audit Layer | Policy Engine evaluates action; verify `queryAuditLog(log_type: POLICY_DECISION)` returns the decision with full rule evaluation context |
+| Alert fires on anomaly threshold breach | Submit N+1 boundary-crossing events within alert window; verify BOUNDARY_CROSSING_SPIKE alert fires |
+| Compliance report matches raw log | Generate FULL_AUDIT report for a time range; verify every audit entry in that range appears exactly once |
+| `traceAction()` reconstructs approval chain | Submit action requiring approval; approve it; execute it; call `traceAction()`; verify all 3 steps present in trace with correct timestamps and actors |
+| Config change logged as audit event | Admin modifies a policy rule via Admin Interface; verify config change audit entry created with old/new values |
+
+### Security Tests
+
+| Test | Approach |
+|---|---|
+| Append-only: no entry can be deleted | Attempt direct deletion of audit entry; verify rejected; verify entry retrievable after attempt |
+| SELF_APPROVAL_ATTEMPT alert | Simulate non-admin approval attempt; verify ERROR-severity alert fired immediately |
+| SECURITY_EVENT for privilege escalation | Simulate identity resolution bypass attempt; verify SECURITY_EVENT alert fired and logged |

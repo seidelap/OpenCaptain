@@ -194,3 +194,42 @@ Blocker {
   resolved: bool
 }
 ```
+
+---
+
+## 7. Test Plan
+
+### Unit Tests
+
+| Function | Test | Expected |
+|---|---|---|
+| `syncWorkItems()` | Team DL with 3 members, 5 assigned tasks | All 5 tasks loaded; dependency graph built; tasks not assigned to team members excluded |
+| `syncWorkItems()` | Cross-team dependency (task blocked by another team's ticket) | External dependency recorded; tracked as dependency risk, not managed work |
+| `trackRequirementAlignment()` | Two team members have identical requirement claims for a task | ALIGNED status returned; no `contradicts` edge created |
+| `trackRequirementAlignment()` | Two team members have divergent requirement claims | DIVERGENT status returned; `contradicts` edge created between conflicting B claims; no auto-resolution |
+| `trackRequirementAlignment()` | Only one team member has stated a requirement | UNKNOWN status returned; insufficient data to determine alignment |
+| `detectBlockers()` | Task with stale action item past deadline and no resolution | STALE_ACTION_ITEM blocker detected; affected team members populated |
+| `detectBlockers()` | Dependency where upstream task has conflicting status claims | DEPENDENCY_AT_RISK blocker detected; severity based on due date proximity |
+| `detectBlockers()` | No issues detected | Returns empty blocker list; no actions proposed |
+| `decideAction()` | REQUIREMENT_DISAGREEMENT blocker detected | `submitAction()` called with proposed message surfacing both understandings; epistemic labels attached |
+| `decideAction()` | EXTERNAL_DEPENDENCY_RISK detected; no authorization to contact other team | `submitAction()` called with proposed request-access action; Policy Engine evaluates |
+| `decideAction()` | COMMITMENT_CONFLICT for same person | `submitAction()` proposed for private message to individual; both commitments included |
+| `generateGoalBrief()` | Team with active work items, one blocker | Layer C context pack returned; retrieval manifest references Layer A/B sources; blocker included |
+| `handleTicketEvent()` | TicketUpdated for task assigned to team member | Work item state updated; dependency graph re-evaluated; `detectBlockers()` re-run |
+| `handleTicketEvent()` | TicketUpdated for task not assigned to this team | Event ignored; no state change |
+
+### Integration Tests
+
+| Test | Approach |
+|---|---|
+| Blocker detection end-to-end | Insert conflicting requirement claims in B graph for a tracked task; verify Goal Engine detects REQUIREMENT_DISAGREEMENT and proposes action via Policy Engine |
+| Cross-team dependency risk → access request | Configure team with external dependency; simulate upstream team delay claims; verify Goal Engine proposes request-access action for out-of-scope contact |
+| Policy gate on all proposed actions | Verify every `decideAction()` output routes through `submitAction()` and is not dispatched directly |
+| Goal brief references correct sources | Generate goal brief; verify all claims in brief have traceable `grounded_in` links to Layer A artifacts |
+
+### Load Tests
+
+| Test | Acceptance Criterion |
+|---|---|
+| `detectBlockers()` at large team scale | 50 work items, 20 team members; blocker detection completes within 2 seconds at p95 |
+| `syncWorkItems()` on large backlog | 200 work items with 50 dependency edges; dependency graph builds without performance degradation |

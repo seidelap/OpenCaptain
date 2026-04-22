@@ -182,3 +182,41 @@ Each active meeting runs as an **independent engine instance** with its own stat
 | Relevant context observed in a concurrent meeting session | Cross-meeting claim match | Medium |
 | Agent was explicitly asked a question | Direct address detected in transcript | Always respond (highest) |
 | Discussion converging too quickly (devil's advocate) | Low objection count, high agreement signal | Low (only if enabled) |
+
+---
+
+## 7. Test Plan
+
+### Unit Tests
+
+| Function | Test | Expected |
+|---|---|---|
+| `handleMeetingEvent()` | `MeetingStarted` event received | New meeting state machine initialized; MEETING_STATE artifact written to Layer A |
+| `handleMeetingEvent()` | `MeetingEnded` event received | State machine finalized; final MEETING_STATE artifact written; telemetry pushed to Audit Layer |
+| `handleMeetingEvent()` | `ParticipantJoined` event — participant below small-meeting threshold | Meeting state updated; participant identity resolved; MEETING_STATE artifact written |
+| `decideMeetingContribution()` | Agent is not called upon; no direct question | No RaiseHand proposed unless relevance threshold met |
+| `decideMeetingContribution()` | Direct question addressed to agent in transcript | `submitAction(Speak)` proposed immediately; highest-priority trigger |
+| `decideMeetingContribution()` | Unresolved contradiction in B graph relevant to current topic | RaiseHand proposed with relevance reason; contribution labeled epistemically |
+| `decideMeetingContribution()` | Relevance score below threshold | No action proposed; decision logged |
+| `composeContribution()` | Contribution contains claim from another meeting session | Cross-meeting claim included; epistemic label attached; source anonymized if configured |
+| `composeContribution()` | Contribution context exceeds token budget | Retrieval manifest records truncation; contribution composed from top-ranked sources only |
+| `handleCalledUpon()` | Agent called upon during meeting | `submitAction(Speak)` submitted immediately; context pack retrieved for content |
+| `ingestTranscriptChunk()` | Real-time transcript chunk received | Written to Layer A via `ingestTranscript()`; async extraction triggered; speaker identity resolved |
+| `writeMeetingStateArtifact()` | State transition occurs (participant joins) | `MEETING_STATE` artifact written to Layer A with meeting_id, participant_count, agenda phase |
+
+### Integration Tests
+
+| Test | Approach |
+|---|---|
+| Meeting transcript → Layer B claims | Feed gold-standard meeting transcript; verify commitments, decisions, and entities appear in Layer B with correct `grounded_in` links |
+| Contribution relevance: contradiction in B triggers hand raise | Insert contradicting claims in B graph for a topic; simulate meeting discussion on that topic; verify agent proposes RaiseHand |
+| Policy gate: speak action evaluated before dispatch | Meeting engine proposes Speak action; verify Policy Engine is called; verify action only dispatched if ALLOW verdict returned |
+| MEETING_STATE readable by Policy Engine | Meeting Engine writes MEETING_STATE artifact; Policy Engine queries it via Knowledge Store; verify correct participant count and phase returned |
+| Concurrent meetings: cross-meeting context | Run two simulated meeting instances; verify claim extracted from meeting A is available as context in meeting B via Knowledge Store |
+
+### Load Tests
+
+| Test | Acceptance Criterion |
+|---|---|
+| Transcript ingestion at real-time speed | Ingestion and extraction pipeline keeps pace with transcript stream; no backlog at p95 |
+| Concurrent meeting instances | 10 concurrent meeting instances; no state bleed between instances; MEETING_STATE artifacts correctly partitioned by meeting_id |

@@ -315,3 +315,52 @@ RetrievalManifest {
   tokens_consumed: number
 }
 ```
+
+---
+
+## 6. Test Plan
+
+### Unit Tests
+
+| Function | Test | Expected |
+|---|---|---|
+| `writeArtifact()` | Write same artifact twice (same external ref) | Second write creates version 2; version 1 unchanged; both retrievable |
+| `writeArtifact()` | Write `MEETING_STATE` artifact | Artifact stored with correct `artifact_type`; queryable via `queryArtifacts(artifact_type: MEETING_STATE)` |
+| `writeArtifact()` | Attempt overwrite of existing artifact | Rejected; new version created instead |
+| `writeClaim()` | New claim conflicts with existing claim in same scope | `contradicts` edge automatically created between the two claims |
+| `writeClaim()` | New claim is consistent with existing claims | No `contradicts` edge; claim stored normally |
+| `writeClaim()` | Claim without `grounded_in` populated | Rejected — constraint enforced |
+| `resolveSupersession()` | Call with valid governance artifact as evidence | `supersedes` edge created; superseded claim gets `valid_until` |
+| `resolveSupersession()` | Call with no evidence | Rejected — `supersedes` without governance evidence is not allowed |
+| `detectContradiction()` | Two claims with opposing predicates for same subject | Both claims connected with `contradicts` edge; neither auto-promoted |
+| `generateContextPack()` | Query with topic match in Layer B | Returns `LayerCArtifact` with populated `retrieval_manifest` |
+| `generateContextPack()` | Query where sources exceed token budget | Truncation flag set in manifest; eligible-but-not-retrieved sources listed |
+| `invalidateCache()` | Layer A artifact updated | All Layer C artifacts whose `retrieval_manifest` references it are marked `invalidated_by` |
+| `ingestTranscript()` | Transcript chunk written | Layer A artifact created with correct `artifact_type: TRANSCRIPT`; async extraction triggered |
+
+### Property Tests
+
+| Property | Enforcement |
+|---|---|
+| No `LayerCArtifact` exists without a `retrieval_manifest` | Schema validation test: attempt to create C artifact without manifest; verify rejection |
+| No `LayerBClaim` exists without at least one `grounded_in` link to Layer A | Constraint enforcement: attempt to write claim with empty `grounded_in`; verify rejection |
+| `supersedes` edges always have a non-null evidence reference | Attempt to create `supersedes` relationship with null evidence; verify rejection |
+| Every Layer A write is append-only | Attempt direct field mutation on existing artifact; verify rejected; verify version created |
+
+### Integration Tests
+
+| Test | Approach |
+|---|---|
+| Extraction pipeline: meeting transcript → Layer B claims | Feed gold-standard transcript; verify expected commitments, entities, and relations appear in Layer B |
+| Contradiction detection across extraction runs | Feed two transcripts with conflicting requirement statements; verify `contradicts` edge in Layer B |
+| Query engine resolves conflict with governance evidence | Insert contradicting claims + decision record in Layer A; query topic; verify superseded claim excluded from result |
+| C promotion to A preserves full lineage | Promote a Layer C artifact; verify new Layer A artifact's provenance chain traces back to all original sources |
+| MEETING_STATE artifact queryable by meeting ID | Meeting Engine writes state; Policy Engine queries `artifact_type: MEETING_STATE, meeting_id: X`; verify correct state returned |
+
+### Load Tests
+
+| Test | Acceptance Criterion |
+|---|---|
+| Layer B query at 6-month synthetic data volume | `queryClaimsForTopic()` returns within 500ms at p95 |
+| Contradiction detection on bulk claim import | 1,000 claims imported; all contradictions detected; no missed conflicts |
+| Concurrent Layer A writes from multiple modules | No data loss; all artifacts correctly versioned under concurrent write load |

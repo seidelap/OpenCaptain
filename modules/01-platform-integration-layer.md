@@ -222,3 +222,56 @@ interface PlatformAdapter {
 ```
 
 This contract ensures uniform behavior across all platforms and allows new adapters to be added without changing downstream modules.
+
+---
+
+## 8. Test Plan
+
+### Unit Tests
+
+| Function | Test | Expected |
+|---|---|---|
+| `normalizeEvent()` | Slack `message` event → `MessageReceived` with correct fields | All required fields populated; sender_id matches platform user |
+| `normalizeEvent()` | Teams `meeting.participant_joined` → `ParticipantJoined` | Meeting ID, participant ID, timestamp all mapped correctly |
+| `normalizeEvent()` | Zoom `webinar.ended` → `MeetingEnded` | Event type correctly identified and mapped |
+| `normalizeEvent()` | Unknown event type from any platform | Event dropped or returned as `UnknownEvent`; no panic |
+| `translateAction()` | `SendMessage` → Slack Block Kit payload | Markdown converted, channel ID mapped, auth header present |
+| `translateAction()` | `RaiseHand` → Teams API call | Correct endpoint, correct meeting ID |
+| `translateAction()` | `CreateTicket` → Jira REST payload | Project ID, fields mapped correctly to Jira schema |
+| `executeWithRetry()` | Platform returns 429 with `Retry-After: 5` | Waits 5s, retries; returns `RATE_LIMITED` after max retries |
+| `executeWithRetry()` | Platform returns 503 three times, then 200 | Retries with backoff; returns `DELIVERED` on success |
+| `executeWithRetry()` | Platform returns 400 (bad request) | Does not retry; returns `FAILED` immediately |
+| `refreshOAuthToken()` | Token expires; refresh succeeds | New token stored; adapter status remains HEALTHY |
+| `refreshOAuthToken()` | Refresh endpoint returns 401 | Adapter marked DEGRADED; alert emitted |
+| `queryPlatformACL()` | User has access to resource | Returns `allowed: true` |
+| `queryPlatformACL()` | User does not have access | Returns `allowed: false`; reason populated |
+| `queryGroupMembership()` | Nested group | All leaf members returned; nested group refs also returned |
+| `queryGroupMembership()` | Empty group | Returns empty members list, no error |
+| `queryGroupMembership()` | Unknown group ref | Returns error; does not panic |
+
+### Contract Tests
+
+| Test | What It Verifies |
+|---|---|
+| `MessageReceived` from Slack vs Teams | Same required fields, same types — schema is identical across adapters |
+| `MeetingStarted` from Zoom vs Teams vs Google Meet | Normalized fields consistent; platform-specific fields isolated to `metadata` |
+| `TicketUpdated` from Jira vs Asana | Same field names, same semantics for `ticket_id`, `field_changes`, `updater_id` |
+
+### Integration Tests
+
+| Test | Approach |
+|---|---|
+| Slack message → normalized event → downstream subscriber receives it | Send a message in test Slack workspace; assert subscriber callback fires with correct event |
+| Action dispatched via adapter → platform confirms delivery | Submit `SendMessage` via Outbound Gate; verify message appears in test Slack channel |
+| Group membership query returns correct members | Seed test org with known group; compare adapter result to expected membership |
+| Token refresh cycle completes without dropped events | Force token expiry mid-stream; verify no events are lost during refresh |
+| Webhook signature validation rejects spoofed payload | Send webhook with invalid HMAC signature; verify rejected before normalization |
+
+### Resilience Tests
+
+| Test | Approach |
+|---|---|
+| Platform API goes down mid-stream | Inject connection failure; verify adapter marks itself DEGRADED, queues retry, recovers |
+| Rate limit hit during bulk action dispatch | Burst 100 actions at rate-limited endpoint; verify all eventually delivered in correct order |
+| Webhook replay (duplicate event delivery) | Deliver same event twice; verify downstream sees it exactly once (idempotency) |
+| Partial adapter initialization (bad credentials) | Start with invalid OAuth config; verify adapter marks DOWN, does not affect other adapters |

@@ -271,3 +271,47 @@ AgentMessage {
 | **Communication boundaries** | `comms.initiate.allowed_groups`, `comms.initiate.outside_whitelist`, `comms.respond.outside_whitelist`, `comms.initiate.always_cc_admin` | Controls who the agent can contact and requires approval for out-of-scope communication |
 | **Agent-to-agent** | `agent.comms.allowed`, `agent.comms.require_human_in_loop` | Both agents' admin DLs must approve; human always in the loop by default |
 | **Content** | `content.share.cross_team`, `content.share.reframe_not_quote`, `content.epistemic_labels.required` | Controls information sharing across teams; requires epistemic labels on all outputs |
+
+---
+
+## 7. Test Plan
+
+### Unit Tests
+
+| Function | Test | Expected |
+|---|---|---|
+| `submitAction()` | Action from whitelisted source to allowed target | Verdict: ALLOW; action dispatched via Platform Integration Layer |
+| `submitAction()` | Action targeting out-of-scope channel with no authorization | Verdict: REQUIRE_APPROVAL; approval request created |
+| `submitAction()` | Action violating a hard DENY rule | Verdict: DENY; denial reason populated; action not dispatched |
+| `submitAction()` | `dry_run: true` with approvable action | Returns verdict without dispatching; no approval request created; no side effects |
+| `submitAction()` | `dry_run: true` with DENY rule | Returns DENY verdict with reason; no log entry in action audit log |
+| `evaluateRules()` | Multiple matching rules — most specific wins | Binding rule is the narrowest-scope match; others are logged as evaluated-but-not-binding |
+| `evaluateRules()` | Unless-condition blocks an otherwise-matching rule | Rule does not fire; unless-check result recorded in evaluation context |
+| `evaluateRules()` | No rule matches | Default-deny behavior; `binding_rule` is null |
+| `assembleContext()` | Agent queries MEETING_STATE artifact for active meeting | Correct MEETING_STATE artifact returned; state fields populated in evaluation context |
+| `assembleContext()` | Authorization Store queried for active authorization | Matching AuthorizationRecord returned; `delegated: true` in context |
+| `requestApproval()` | Approval request sent to correct admin DL | ApprovalRequest created; `logEvent()` called; action status set to PENDING |
+| `processApproval()` | Admin approves with conditions | AuthorizationRecord written to Layer A; conditions stored; action proceeds with conditions applied |
+| `processApproval()` | Non-admin attempts to approve | SELF_APPROVAL_ATTEMPT security alert fired; approval rejected |
+| `processApproval()` | Approval expires before action executes | Authorization marked expired; action not allowed; new approval required |
+| `validatePolicyRule()` | Valid rule structure | Returns valid: true |
+| `validatePolicyRule()` | Rule references undefined entity (unknown group ref) | Returns valid: false with specific error message |
+
+### Integration Tests
+
+| Test | Approach |
+|---|---|
+| End-to-end: goal engine blocker → policy evaluation → platform dispatch | Goal Engine detects blocker; submits proposed `SendMessage`; Policy Engine evaluates; Outbound Gate dispatches to Platform Layer; verify message delivered |
+| Approval workflow: out-of-scope message → request → approval → execute | Submit action targeting out-of-scope channel; verify approval request sent to admin DL; admin approves; verify original action executes |
+| Authorization expiry: action approved at T=0 blocked at T=expiry+1 | Grant authorization with 60-second TTL; verify ALLOW at T=30; verify DENY at T=90 |
+| MEETING_STATE context: large vs. small meeting rule | Meeting Engine writes MEETING_STATE with 15 participants; Policy Engine evaluates `speak` action; verify correct threshold-based rule fires |
+| Multi-rule: most specific rule wins | Configure both a broad DENY and a narrow ALLOW for same action type; verify narrow ALLOW takes precedence |
+
+### Security Tests
+
+| Test | Approach |
+|---|---|
+| Self-approval blocked | Submitting module attempts to approve its own proposed action; verify blocked and SELF_APPROVAL_ATTEMPT alert fired |
+| Rule bypass via dry-run | Verify `dry_run: true` never dispatches an action even if verdict is ALLOW |
+| Admin DL poisoning: non-admin in admin DL | Attempt approval from user not in admin DL; verify denied with security event logged |
+| Replay attack: reuse expired authorization | Attempt to reuse an expired `AuthorizationId`; verify denied |

@@ -295,3 +295,43 @@ Supports the chat-based configuration interface. Parses the admin's chat message
 - **Change auditing:** Every configuration change is logged immutably to the Audit Layer with who, what, when, and the old/new values.
 - **Versioned config:** All configuration is versioned. Previous versions are retained for rollback and audit.
 - **Atomic imports:** Config-as-code imports are all-or-nothing — partial application of a config file is never allowed.
+
+---
+
+## 7. Test Plan
+
+### Unit Tests
+
+| Function | Test | Expected |
+|---|---|---|
+| `getPolicyRules()` | Rules exist for calling module | Returns current active rule set for caller's module scope |
+| `getPolicyRules()` | No rules defined for scope | Returns empty rule set; no error |
+| `updatePolicyRule()` | Valid rule submitted | Rule validated via `validatePolicyRule()`; stored and versioned; change logged to Audit Layer |
+| `updatePolicyRule()` | Rule with undefined group reference | Validation fails; change rejected; error message returned |
+| `updatePolicyRule()` | Non-admin caller | Rejected with authorization error; SECURITY_EVENT logged |
+| `updateWhitelist()` | Add new team DL to whitelist | Whitelist updated; change versioned and audited; consuming modules receive `onConfigChanged()` notification |
+| `updateWhitelist()` | Remove team DL from whitelist | Whitelist updated; consuming modules notified; in-flight authorizations for removed scope invalidated |
+| `testPolicyRule()` | Dry-run hypothetical action against new rule | Calls `submitAction(dry_run: true)` on Policy Engine; returns verdict without side effects |
+| `rollbackConfig()` | Roll back to previous version | Previous config version restored; change logged with rollback reason |
+| `importConfig()` | Valid YAML config file submitted | All-or-nothing application; all rules validated before any changes applied |
+| `importConfig()` | Config file with one invalid rule | Import rejected entirely; no partial application; validation error identifies offending rule |
+| `onConfigChanged()` | Module subscribes and config changes | Subscriber callback fires with change details; all subscribed modules notified |
+| `getAdminDLs()` | Admin DL defined in config | Returns current admin DL list for specified scope |
+
+### Integration Tests
+
+| Test | Approach |
+|---|---|
+| Config change propagates to Policy Engine | Update a policy rule via Admin Interface; verify `getPolicyRules()` returns new rule to Policy Engine within expected propagation window |
+| Dry-run test workflow | Admin adds new DENY rule; calls `testPolicyRule()` with a hypothetical action that would be affected; verify DENY verdict returned with no audit trail created for the action |
+| Rollback restores rule behavior | Apply rule R1; verify Policy Engine behavior; apply rule R2 (conflicting); verify new behavior; roll back to pre-R2 state; verify original behavior restored |
+| Config-as-code atomic import | Submit config file with 5 rules, 1 invalid; verify all 5 are rejected; verify zero state change in Policy Engine |
+| Alert subscription notifies admin | Admin subscribes to APPROVAL_BACKLOG alert via Admin Interface; create backlog condition; verify admin receives alert via subscribed channel |
+
+### Security Tests
+
+| Test | Approach |
+|---|---|
+| Non-admin write rejected | Non-admin user submits `updatePolicyRule()`; verify rejected and SECURITY_EVENT logged |
+| OAuth credentials never in general config | Inspect config export; verify no credentials present in exported YAML; verify credentials only accessible through credential store path |
+| Versioned config prevents silent overwrites | Submit config update; submit conflicting update without version token; verify second update rejected with version conflict error |

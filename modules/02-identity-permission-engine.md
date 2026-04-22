@@ -213,3 +213,45 @@ CachedGroupMembership {
 | 1 | Email address match | High | No |
 | 2 | Admin-configured manual mapping | High | No (pre-confirmed by admin) |
 | 3 | Display name + org unit heuristic | Low | Yes — flagged for confirmation |
+
+---
+
+## 6. Test Plan
+
+### Unit Tests
+
+| Function | Test | Expected |
+|---|---|---|
+| `resolveIdentity()` | Platform ref with known mapping | Returns correct `UnifiedIdentity` with all platform_ids populated |
+| `resolveIdentity()` | Email ref with known mapping | Returns correct `UnifiedIdentity` |
+| `resolveIdentity()` | Platform ref with no mapping, email match found | Creates mapping via primary strategy; returns resolved identity |
+| `resolveIdentity()` | Platform ref with no mapping, no email match | Returns null; heuristic candidate flagged for confirmation if display name match found |
+| `resolveIdentity()` | Admin manual mapping overrides email strategy | Manual mapping takes precedence |
+| `resolveGroup()` | Flat group with 3 members | Returns all 3 members in `members[]`; `nested_groups` empty |
+| `resolveGroup()` | Nested group (group A contains group B) | Returns all leaf members expanded; `nested_groups` contains B ref |
+| `resolveGroup()` | Empty group | Returns `members: []`; no error |
+| `resolveGroup()` | Unknown group ref | Returns error; does not panic |
+| `canAccess()` | Delegated mode, user has access | Returns `allowed: true, delegated: true` |
+| `canAccess()` | Delegated mode, user does not have access | Returns `allowed: false` even if app scope technically allows |
+| `canAccess()` | App-level mode (fallback), app has access | Returns `allowed: true, delegated: false` |
+| `getEffectiveScope()` | Agent has broad OAuth scope but narrow platform ACL | Returns intersection — narrow ACL is the binding constraint |
+| `getEffectiveScope()` | Agent has narrow OAuth scope but broad platform ACL | Returns intersection — narrow OAuth scope is binding |
+| `snapshotACLState()` | Snapshot for whitelisted team scope | ACL snapshot artifact written to Layer A with correct `valid_from` |
+| `invalidateGroupCache()` | Parent group G contains subgroup S; S changes | G's cache also marked stale; both re-resolved within SLA |
+
+### Integration Tests
+
+| Test | Approach |
+|---|---|
+| Group membership change in platform propagates to cache within SLA | Modify group in test tenant; verify `resolveGroup()` reflects change within configured SLA |
+| Delegated permission blocks access to resource user cannot see | Configure delegated mode; attempt access to resource outside user's ACL; verify denial |
+| Cross-platform identity resolution links same human across Slack and Jira | Seed Slack user and Jira user with same email; verify `resolveIdentity()` returns same `unified_id` for both |
+| Heuristic match flagged for human confirmation | Seed two users with similar names, different emails; verify heuristic match is not committed without confirmation |
+
+### Security Tests
+
+| Test | Approach |
+|---|---|
+| Privilege escalation: agent cannot bypass platform ACL with app-only scope when delegated mode is configured | Configure delegated mode; attempt app-only ACL query; verify blocked |
+| Cross-platform identity confusion | Fuzz with similar display names, different orgs; verify no user A is ever returned for user B |
+| Cache poisoning: stale cache does not persist beyond SLA | Set short TTL; verify expired entries always re-resolved from platform |
