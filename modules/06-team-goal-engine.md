@@ -1,0 +1,214 @@
+# Module 6: Team Goal Engine
+
+## 1. Purpose
+
+The "scrum lead" decision brain for its assigned team. Tracks the team's owned work, progress toward goals, and shared understanding of what each task requires. When blockers, risks, or requirement disagreements are detected, the engine decides which actions to take to help the team make progress — then **proposes** those actions to the Policy Engine. The Goal Engine itself has **no communication channel** to the outside world; it reads from the Knowledge Store and proposes actions. Even requesting access to a currently disallowed action is itself a normal proposed action routed through the Policy Engine.
+
+---
+
+## 2. Module Dependencies
+
+### 2.1 Modules This Module Depends On
+
+| Dependency | What It Needs | Why |
+|---|---|---|
+| **Platform Integration Layer (Module 1)** | Inbound events via EventBus (`TicketUpdated`, `TicketCreated`, `MessageReceived` in team channels) | The engine receives ticket/task lifecycle events and team channel messages to track work item progress and extract requirement understanding |
+| **Identity & Permission Engine (Module 2)** | `resolveIdentity()`, `getTeamMembers()` | Resolves task assignees and verifies team membership to scope the goal tracker to this team's work only |
+| **Policy & Governance Engine (Module 3)** | `submitAction()` | Every proposed action (surface blocker, suggest sync, request access) is submitted to the Policy Engine. The Goal Engine never communicates directly. |
+| **Knowledge Store (Module 4)** | `queryClaimsForEntity()`, `queryClaimsForTopic()`, `getContradictions()`, `writeClaim()`, `generateContextPack()` | Reads team-scoped claims (tasks, dependencies, commitments, requirements) from Layer B. Detects requirement disagreements via contradiction queries. Writes state updates and new claims. Requests goal briefs (Layer C) for team status summaries. |
+| **Configuration & Admin Interface (Module 8)** | `getGoalEngineConfig()` | Team scope configuration (which team DL this engine instance serves), blocker detection sensitivity, sync suggestion thresholds, work item refresh intervals |
+
+### 2.2 Modules That Depend On This Module
+
+| Consumer | What It Uses | Why |
+|---|---|---|
+| **Audit & Observability Layer (Module 7)** | Goal engine decision telemetry | Logs all proposed actions (surfaced blockers, suggested syncs, requested access), their policy verdicts, and team work tracking state changes |
+
+*Note: Like the Meeting Engine, the Goal Engine is a leaf decision-maker. It reads from the Knowledge Store and proposes actions to the Policy Engine. No other module calls into it directly.*
+
+---
+
+## 3. Interfaces
+
+### 3.1 Provided Interfaces (This Module Exposes)
+
+#### Team Goal State Query (for Audit/Observability)
+
+```
+getTeamGoalState(team_dl: UnifiedGroupRef) -> TeamGoalState
+  Inputs:
+    team_dl             — the team distribution list this engine instance serves
+  Returns:
+    TeamGoalState {
+      team_dl,
+      active_goals: GoalSummary[],
+      active_work_items: WorkItemSummary[],
+      detected_blockers: Blocker[],
+      detected_disagreements: RequirementDisagreement[],
+      at_risk_dependencies: DependencyRisk[],
+      stale_action_items: StaleItem[],
+      last_evaluated_at: timestamp
+    }
+
+getWorkItemDependencyGraph(team_dl: UnifiedGroupRef) -> DependencyGraph
+  Inputs:
+    team_dl             — team scope
+  Returns:
+    DependencyGraph { nodes: WorkItem[], edges: DependencyEdge[] }
+    — the team's internal dependency graph showing task ordering, blockers, and risks
+```
+
+### 3.2 Required Interfaces (This Module Consumes)
+
+#### From Platform Integration Layer (Module 1):
+
+```
+subscribe(event_types: [TicketUpdated, TicketCreated, MessageReceived], callback) -> SubscriptionHandle
+```
+
+#### From Identity & Permission Engine (Module 2):
+
+```
+resolveIdentity(platform: Platform, platform_user_id: string) -> UnifiedIdentity?
+getTeamMembers(team_dl: UnifiedGroupRef) -> UnifiedIdentity[]
+```
+
+#### From Policy & Governance Engine (Module 3):
+
+```
+submitAction(proposed_action: ProposedAction, source_module: GOAL_ENGINE) -> ActionOutcome
+```
+
+#### From Knowledge Store (Module 4):
+
+```
+queryClaimsForEntity(entity_id: EntityId, scope: ClaimScope?) -> ClaimSet
+queryClaimsForTopic(topic: string, scope: ClaimScope?, as_of: timestamp?) -> ClaimSet
+getContradictions(scope: ClaimScope?, topic: string?) -> ConflictPair[]
+writeClaim(claim: LayerBClaim) -> ClaimId
+generateContextPack(query: ContextQuery) -> LayerCArtifact
+```
+
+#### From Configuration & Admin Interface (Module 8):
+
+```
+getGoalEngineConfig() -> GoalEngineConfig
+  — Returns: team_dl, blocker_detection_sensitivity, sync_suggestion_threshold,
+    work_item_refresh_interval, external_dependency_alert_enabled
+```
+
+---
+
+## 4. Core Functions
+
+### 4.1 `syncWorkItems(team_dl: UnifiedGroupRef) -> void`
+
+**Inputs:**
+- `team_dl` — the team this engine instance serves
+
+**What it does:**
+Retrieves the list of team members via the Identity Engine's `getTeamMembers()`. Queries the Knowledge Store for all work item claims (tasks, epics, tickets) from Jira/Asana that are assigned to team members or tagged with the team's project. Builds an internal dependency graph: which tasks block which other tasks, which tasks share deliverables, which tasks have due dates. Scopes the goal graph strictly to team-owned items — items owned by other teams are tracked only as external dependencies, not managed. Compares current work item state against previous state to detect progress, stalls, and new items.
+
+### 4.2 `trackRequirementAlignment(work_item_id: EntityId) -> RequirementAlignmentStatus`
+
+**Inputs:**
+- `work_item_id` — the task/ticket entity in the B graph
+
+**What it does:**
+This is the Requirement Alignment Tracker. Queries the Knowledge Store for all claims about what this work item requires — sourced from meeting transcripts, messages, ticket descriptions, comments, and any other artifact mentioning the work item. Groups claims by author to build a per-person understanding: "Person A believes this task requires X, Person B believes it requires Y." Detects divergent understandings by comparing claim content semantically. If divergent understandings are found: flags them as B-layer claims with `contradicts` edges. Does **not** resolve the disagreement — surfaces it for the team to resolve. Returns the alignment status: ALIGNED (all team members share the same understanding), DIVERGENT (conflicting requirements detected), or UNKNOWN (insufficient data).
+
+### 4.3 `detectBlockers(team_dl: UnifiedGroupRef) -> Blocker[]`
+
+**Inputs:**
+- `team_dl` — team scope
+
+**What it does:**
+This is the Blocker & Disagreement Detector. Monitors the B graph for:
+- **Conflicting requirements:** Claims from different team members about what "done" means for a task that have `contradicts` edges
+- **Dependencies at risk:** Tasks whose upstream dependencies have slipped, stalled, or have conflicting status claims
+- **Stale action items:** Commitments or action items extracted from meetings that have passed their stated deadline with no resolution claim
+- **Commitment tensions:** Two commitments from the same person or team that conflict in scope or timing
+- **External dependency risks:** Cross-team dependencies where the other team's progress claims suggest delay
+
+For each detected blocker: assesses severity (blocking progress now vs. risk of future block) and identifies which team members are affected. Returns the list of blockers sorted by severity.
+
+### 4.4 `decideAction(blocker: Blocker) -> ProposedAction?`
+
+**Inputs:**
+- `blocker` — a detected blocker, disagreement, or risk
+
+**What it does:**
+This is the Action Decision Engine. Given a detected issue, determines what action (if any) the agent should propose to help the team make progress. Decision logic:
+
+| Situation | Proposed Action |
+|---|---|
+| Requirement disagreement between team members | Propose: surface both understandings to the team channel with epistemic labels, suggest a sync |
+| Intra-team dependency at risk | Propose: alert the dependent task owner and the blocking task owner in the team channel |
+| Stale action item past deadline | Propose: remind the team in the channel with the original commitment context |
+| Cross-team dependency at risk | Propose: request access to contact the other team (if not currently allowed — this is itself a proposed action) |
+| Commitment conflict (same person, two conflicting deadlines) | Propose: surface both commitments to the individual privately with epistemic labels |
+
+For every proposed action: attaches epistemic labels to the content ("Two different requirements have been stated for this task...", "This dependency may be at risk..."). Never adjudicates disagreements — always surfaces both sides. Submits the proposed action to the Policy Engine via `submitAction()`.
+
+### 4.5 `generateGoalBrief(team_dl: UnifiedGroupRef) -> LayerCArtifact`
+
+**Inputs:**
+- `team_dl` — team scope
+
+**What it does:**
+Requests a Layer C context pack from the Knowledge Store scoped to the team's goals, active work items, blockers, and risks. The context pack includes: team goal summary, work item status overview, detected blockers/disagreements, at-risk dependencies, and upcoming deadlines. The brief correctly references all relevant Layer A/B sources via the retrieval manifest. This brief can be used by the agent for meeting prep (handed to the Meeting Engine) or proposed as a team status message via the Policy Engine.
+
+### 4.6 `handleTicketEvent(event: OpenCaptainEvent) -> void`
+
+**Inputs:**
+- `event` — a `TicketUpdated` or `TicketCreated` event
+
+**What it does:**
+Checks if the ticket belongs to this team's scope (assignee is a team member, or project matches team config). If in scope: updates the internal work item tracker and dependency graph. Checks if the update changes a dependency relationship (e.g., a blocking task was marked done). Checks if the update contradicts a previous requirement claim in the B graph. If state change detected: re-runs `detectBlockers()` to check for newly resolved or newly created blockers.
+
+---
+
+## 5. Key Design Constraints
+
+1. **Decision-only module:** The Goal Engine never communicates directly with humans or other systems. All proposed actions go through the Policy Engine.
+2. **Never adjudicates:** When requirement disagreements are found, the engine surfaces both sides with epistemic labels. The team resolves the disagreement. The engine records the resolution when it observes it.
+3. **Requesting access is a normal action:** If the engine needs to contact another team or access a resource it currently can't, it proposes a "request access" action — which the Policy Engine evaluates. There is no special escalation path.
+4. **Team-scoped:** Each Goal Engine instance serves exactly one team DL. Cross-team coordination happens via the Policy Engine's boundary rules and the Knowledge Store's shared B graph — not via direct Goal Engine-to-Goal Engine communication.
+5. **Un-siloing is emergent:** The engine keeps team members aligned toward shared goals by surfacing information they might not have seen. Un-siloing within the team is a natural effect of this alignment, not a stated design objective.
+
+---
+
+## 6. Data Model
+
+### WorkItem
+
+```
+WorkItem {
+  entity_id: EntityId                      // stable reference in B graph
+  platform: Platform                       // Jira, Asana, etc.
+  platform_ref: string                     // external ticket ID
+  title: string
+  assignee: UnifiedIdentity?
+  status: string                           // platform-native status
+  dependencies: EntityId[]                 // tasks this blocks or is blocked by
+  due_date: timestamp?
+  requirement_claims: ClaimId[]            // B graph claims about what this requires
+  alignment_status: ALIGNED | DIVERGENT | UNKNOWN
+}
+```
+
+### Blocker
+
+```
+Blocker {
+  blocker_id: string
+  type: REQUIREMENT_DISAGREEMENT | DEPENDENCY_AT_RISK | STALE_ACTION_ITEM |
+        COMMITMENT_CONFLICT | EXTERNAL_DEPENDENCY_RISK
+  severity: HIGH | MEDIUM | LOW
+  affected_work_items: EntityId[]
+  affected_team_members: UnifiedIdentity[]
+  evidence_claims: ClaimId[]               // B graph claims supporting the detection
+  detected_at: timestamp
+  resolved: bool
+}
+```
