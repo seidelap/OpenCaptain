@@ -16,15 +16,14 @@ Ensure that every action the agent takes, every policy decision, every approval,
 | **Identity & Permission Engine (Module 2)** | `resolveIdentity()` | Resolves actor identities (user IDs, agent IDs) into display names for compliance reports and dashboards |
 | **Policy & Governance Engine (Module 3)** | Policy decision records (received as structured logs after every evaluation) | Every policy evaluation (ALLOW, DENY, REQUIRE_APPROVAL) with full context is logged: which rules were evaluated, which was binding, what the context was |
 | **Knowledge Store (Module 4)** | `queryArtifacts()`, `getProvenance()`, `getContradictions()` | Queries Layer A artifacts for compliance reports (e.g., "what information crossed team boundaries?"), traces provenance chains for audit investigations, queries open contradictions for the CONTRADICTION_STATUS compliance report |
-| **Meeting Participation Engine (Module 5)** | Meeting participation telemetry (via `getMeetingState()`, `getActiveMeetings()`) | Logs meeting join/leave, contributions made/suppressed, state transitions, and contribution latency |
-| **Team Goal Engine (Module 6)** | Goal engine telemetry (via `getTeamGoalState()`) | Logs detected blockers, proposed actions, action verdicts, and team work tracking state |
 | **Configuration & Admin Interface (Module 8)** | `getAuditConfig()`, config change events | Log retention policies, alert thresholds, dashboard configuration. Also logs all configuration changes as audit events. |
 
 ### 2.2 Modules That Depend On This Module
 
 | Consumer | What It Uses | Why |
 |---|---|---|
-| **Configuration & Admin Interface (Module 8)** | `queryAuditLog()`, `getComplianceReport()`, dashboard data | The Admin Interface surfaces audit data, dashboards, and compliance reports to administrators |
+| **Configuration & Admin Interface (Module 8)** | `queryAuditLog()`, `getComplianceReport()`, `getDashboardData()`, `subscribeToAlerts()` | The Admin Interface surfaces audit data, dashboards, compliance reports, and real-time alerts to administrators |
+| **All modules (Modules 1–6, 8)** | `logEvent()` | Every module pushes its significant actions, decisions, and state changes to this module's immutable log |
 
 ---
 
@@ -53,16 +52,12 @@ This is the primary write interface. Every module calls `logEvent()` to record s
 queryAuditLog(query: AuditQuery) -> AuditLogEntry[]
   Inputs:
     query               — filter by: time_range, actor_id, action_type, target_id,
-                          policy_decision, approval_ref, module_source, severity
+                          policy_decision, approval_ref, module_source, severity,
+                          log_type: GENERAL | POLICY_DECISION | ALL (default ALL)
   Returns:
-    Matching audit entries, ordered by timestamp
-
-queryPolicyDecisionLog(query: PolicyDecisionQuery) -> PolicyDecisionEntry[]
-  Inputs:
-    query               — filter by: time_range, proposed_action_type, verdict,
-                          binding_rule_id, target_id, source_module
-  Returns:
-    Policy decision records with full evaluation context
+    Matching audit entries, ordered by timestamp.
+    When log_type: POLICY_DECISION, entries include the full evaluation context
+    (rules evaluated, binding rule, verdict, context snapshot) in their metadata field.
 ```
 
 #### Compliance Reporting
@@ -115,7 +110,7 @@ getAdapterHealth(platform: Platform) -> AdapterHealth
 #### From Identity & Permission Engine (Module 2):
 
 ```
-resolveIdentity(platform: Platform, platform_user_id: string) -> UnifiedIdentity?
+resolveIdentity(ref: PlatformRef | EmailRef) -> UnifiedIdentity?
 ```
 
 #### From Policy & Governance Engine (Module 3):
@@ -130,19 +125,6 @@ getProvenance(artifact_id: ArtifactId) -> ProvenanceGraph
 getContradictions(scope: ClaimScope?, topic: string?) -> ConflictPair[]
 ```
 
-#### From Meeting Participation Engine (Module 5):
-
-```
-getMeetingState(meeting_id: string) -> MeetingState
-getActiveMeetings() -> MeetingState[]
-```
-
-#### From Team Goal Engine (Module 6):
-
-```
-getTeamGoalState(team_dl: UnifiedGroupRef) -> TeamGoalState
-```
-
 #### From Configuration & Admin Interface (Module 8):
 
 ```
@@ -150,9 +132,13 @@ getAuditConfig() -> AuditConfig
   — Returns: log_retention_days, alert_thresholds, dashboard_refresh_interval,
     compliance_report_schedule, anomaly_detection_sensitivity
 
-onConfigChanged(callback: (change: ConfigChange) -> void) -> void
+onConfigChanged(callback: (change: ConfigChange) -> void) -> SubscriptionHandle
   — Subscribe to config changes; logs each change as an audit event
 ```
+
+*Note: Modules 5 and 6 push their telemetry here via `logEvent()` — this module does not
+pull state from them. Meeting state and goal state are readable from the Knowledge Store
+(MEETING_STATE artifacts) for any module that needs to query them.*
 
 ---
 

@@ -13,18 +13,15 @@ The "scrum lead" decision brain for its assigned team. Tracks the team's owned w
 | Dependency | What It Needs | Why |
 |---|---|---|
 | **Platform Integration Layer (Module 1)** | Inbound events via EventBus (`TicketUpdated`, `TicketCreated`, `MessageReceived` in team channels) | The engine receives ticket/task lifecycle events and team channel messages to track work item progress and extract requirement understanding |
-| **Identity & Permission Engine (Module 2)** | `resolveIdentity()`, `getTeamMembers()` | Resolves task assignees and verifies team membership to scope the goal tracker to this team's work only |
+| **Identity & Permission Engine (Module 2)** | `resolveIdentity()`, `resolveGroup()` | Resolves task assignees and verifies team membership (via `resolveGroup(team_dl).members`) to scope the goal tracker to this team's work only |
 | **Policy & Governance Engine (Module 3)** | `submitAction()` | Every proposed action (surface blocker, suggest sync, request access) is submitted to the Policy Engine. The Goal Engine never communicates directly. |
 | **Knowledge Store (Module 4)** | `queryClaimsForEntity()`, `queryClaimsForTopic()`, `getContradictions()`, `writeClaim()`, `generateContextPack()` | Reads team-scoped claims (tasks, dependencies, commitments, requirements) from Layer B. Detects requirement disagreements via contradiction queries. Writes state updates and new claims. Requests goal briefs (Layer C) for team status summaries. |
+| **Audit & Observability Layer (Module 7)** | `logEvent()` | Pushes telemetry (detected blockers, requirement disagreements, proposed actions, policy verdicts) to the immutable audit log |
 | **Configuration & Admin Interface (Module 8)** | `getGoalEngineConfig()` | Team scope configuration (which team DL this engine instance serves), blocker detection sensitivity, sync suggestion thresholds, work item refresh intervals |
 
 ### 2.2 Modules That Depend On This Module
 
-| Consumer | What It Uses | Why |
-|---|---|---|
-| **Audit & Observability Layer (Module 7)** | Goal engine decision telemetry | Logs all proposed actions (surfaced blockers, suggested syncs, requested access), their policy verdicts, and team work tracking state changes |
-
-*Note: Like the Meeting Engine, the Goal Engine is a leaf decision-maker. It reads from the Knowledge Store and proposes actions to the Policy Engine. No other module calls into it directly.*
+*None. Like the Meeting Engine, the Goal Engine is a true leaf consumer. It reads from other modules and pushes events outward. No module calls into it directly.*
 
 ---
 
@@ -32,31 +29,7 @@ The "scrum lead" decision brain for its assigned team. Tracks the team's owned w
 
 ### 3.1 Provided Interfaces (This Module Exposes)
 
-#### Team Goal State Query (for Audit/Observability)
-
-```
-getTeamGoalState(team_dl: UnifiedGroupRef) -> TeamGoalState
-  Inputs:
-    team_dl             — the team distribution list this engine instance serves
-  Returns:
-    TeamGoalState {
-      team_dl,
-      active_goals: GoalSummary[],
-      active_work_items: WorkItemSummary[],
-      detected_blockers: Blocker[],
-      detected_disagreements: RequirementDisagreement[],
-      at_risk_dependencies: DependencyRisk[],
-      stale_action_items: StaleItem[],
-      last_evaluated_at: timestamp
-    }
-
-getWorkItemDependencyGraph(team_dl: UnifiedGroupRef) -> DependencyGraph
-  Inputs:
-    team_dl             — team scope
-  Returns:
-    DependencyGraph { nodes: WorkItem[], edges: DependencyEdge[] }
-    — the team's internal dependency graph showing task ordering, blockers, and risks
-```
+*None. This module is a leaf consumer. Goal state changes (detected blockers, requirement disagreements, work item updates) are pushed to the Audit Layer via `logEvent()`. No module polls this module directly.*
 
 ### 3.2 Required Interfaces (This Module Consumes)
 
@@ -70,7 +43,8 @@ subscribe(event_types: [TicketUpdated, TicketCreated, MessageReceived], callback
 
 ```
 resolveIdentity(platform: Platform, platform_user_id: string) -> UnifiedIdentity?
-getTeamMembers(team_dl: UnifiedGroupRef) -> UnifiedIdentity[]
+resolveGroup(group_ref: UnifiedGroupRef) -> ResolvedGroup
+  — Used as resolveGroup(team_dl).members to scope work tracking to this team
 ```
 
 #### From Policy & Governance Engine (Module 3):
@@ -87,6 +61,14 @@ queryClaimsForTopic(topic: string, scope: ClaimScope?, as_of: timestamp?) -> Cla
 getContradictions(scope: ClaimScope?, topic: string?) -> ConflictPair[]
 writeClaim(claim: LayerBClaim) -> ClaimId
 generateContextPack(query: ContextQuery) -> LayerCArtifact
+```
+
+#### From Audit & Observability Layer (Module 7):
+
+```
+logEvent(entry: AuditLogEntry) -> AuditLogId
+  — Push telemetry: detected blockers, requirement disagreements, proposed actions,
+    policy verdicts, work item state changes
 ```
 
 #### From Configuration & Admin Interface (Module 8):
@@ -107,7 +89,7 @@ getGoalEngineConfig() -> GoalEngineConfig
 - `team_dl` — the team this engine instance serves
 
 **What it does:**
-Retrieves the list of team members via the Identity Engine's `getTeamMembers()`. Queries the Knowledge Store for all work item claims (tasks, epics, tickets) from Jira/Asana that are assigned to team members or tagged with the team's project. Builds an internal dependency graph: which tasks block which other tasks, which tasks share deliverables, which tasks have due dates. Scopes the goal graph strictly to team-owned items — items owned by other teams are tracked only as external dependencies, not managed. Compares current work item state against previous state to detect progress, stalls, and new items.
+Retrieves the list of team members via the Identity Engine's `resolveGroup(team_dl).members`. Queries the Knowledge Store for all work item claims (tasks, epics, tickets) from Jira/Asana that are assigned to team members or tagged with the team's project. Builds an internal dependency graph: which tasks block which other tasks, which tasks share deliverables, which tasks have due dates. Scopes the goal graph strictly to team-owned items — items owned by other teams are tracked only as external dependencies, not managed. Compares current work item state against previous state to detect progress, stalls, and new items.
 
 ### 4.2 `trackRequirementAlignment(work_item_id: EntityId) -> RequirementAlignmentStatus`
 

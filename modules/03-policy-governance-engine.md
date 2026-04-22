@@ -13,9 +13,8 @@ The behavioral and communication governance brain of OpenCaptain. Encodes and en
 | Dependency | What It Needs | Why |
 |---|---|---|
 | **Platform Integration Layer (Module 1)** | `dispatchAction()` | The Outbound Gate dispatches ALLOW-verdicted actions through the Platform Integration Layer for delivery to the target platform |
-| **Identity & Permission Engine (Module 2)** | `resolveGroup()`, `isWhitelistedMember()`, `canAccess()`, `getEffectiveScope()` | The Context Assembler calls the Identity Engine to resolve recipient group membership, check whitelist status, and verify platform-level permissions when building evaluation context for policy rules |
+| **Identity & Permission Engine (Module 2)** | `resolveIdentity()`, `resolveGroup()`, `canAccess()`, `getEffectiveScope()` | The Context Assembler calls the Identity Engine to resolve identities, determine group memberships (whitelist checks use `resolveGroup().members`), and verify platform-level permissions |
 | **Knowledge Store (Module 4)** | `writeArtifact()`, `queryAuthorizations()` | AuthorizationRecords are durably written to Layer A as governance artifacts. The Context Assembler queries active authorizations from the Authorization Store (which rebuilds from Layer A on restart) |
-| **Meeting Participation Engine (Module 5)** | `getMeetingState()` | The Context Assembler calls `getMeetingState()` to retrieve participant count, hand-raise status, and whether the agent was called upon when evaluating meeting-related policy rules. **Note: this creates a circular dependency with Module 5, which depends on Module 3 for `submitAction()`.** |
 | **Audit & Observability Layer (Module 7)** | `logEvent()` | Every policy evaluation (ALLOW, DENY, REQUIRE_APPROVAL) is pushed to the Audit Layer's immutable log via `logEvent()` |
 | **Configuration & Admin Interface (Module 8)** | `getPolicyRules()`, `getThresholds()`, `getWhitelists()`, `getAdminDLs()` | All policy rules, thresholds, whitelist configurations, and admin DL definitions are sourced from the config module |
 
@@ -34,41 +33,36 @@ The behavioral and communication governance brain of OpenCaptain. Encodes and en
 
 ### 3.1 Provided Interfaces (This Module Exposes)
 
-#### Policy Evaluation
-
-```
-evaluateAction(proposed_action: ProposedAction, context: ActionContext) -> PolicyVerdict
-  Inputs:
-    proposed_action     — the action the caller wants to execute (SendMessage, Speak, CreateTicket, etc.)
-    context             — pre-assembled or auto-assembled context (meeting state, channel, participants, etc.)
-  Returns:
-    PolicyVerdict {
-      decision: ALLOW | DENY | REQUIRE_APPROVAL,
-      rules_evaluated: RuleEvaluation[],
-      binding_rule: RuleId?,
-      denial_reason: string?,
-      approval_target: UnifiedGroupRef?,   // admin DL to request approval from, if REQUIRE_APPROVAL
-      conditions: string[]?                 // any conditions attached to an ALLOW (e.g., "admin must be CC'd")
-    }
-```
-
 #### Action Submission (Outbound Gate)
 
 ```
-submitAction(proposed_action: ProposedAction, source_module: ModuleId) -> ActionOutcome
+submitAction(proposed_action: ProposedAction, source_module: ModuleId, dry_run: bool = false) -> ActionOutcome
   Inputs:
     proposed_action     — the action to evaluate and potentially dispatch
     source_module       — which module is proposing this action (MEETING_ENGINE, GOAL_ENGINE, etc.)
+    dry_run             — if true, runs context assembly + policy evaluation but does NOT dispatch
+                          or enqueue for approval. Returns verdict only. Used by the Admin
+                          Interface to test rule changes against hypothetical actions.
   Returns:
     ActionOutcome {
-      status: DISPATCHED | DENIED | PENDING_APPROVAL,
+      status: DISPATCHED | DENIED | PENDING_APPROVAL | DRY_RUN_VERDICT,
       action_id: string,
-      approval_request_id: string?,        // if PENDING_APPROVAL
+      verdict: PolicyVerdict?,              // populated when dry_run: true
+      approval_request_id: string?,         // if PENDING_APPROVAL
       dispatch_result: ActionResult?        // if DISPATCHED
     }
+
+  PolicyVerdict {
+    decision: ALLOW | DENY | REQUIRE_APPROVAL,
+    rules_evaluated: RuleEvaluation[],
+    binding_rule: RuleId?,
+    denial_reason: string?,
+    approval_target: UnifiedGroupRef?,      // admin DL, if REQUIRE_APPROVAL
+    conditions: string[]?                    // any ALLOW conditions (e.g., "admin must be CC'd")
+  }
 ```
 
-This is the **primary entry point** for all modules that want to execute actions. It wraps the full pipeline: context assembly -> policy evaluation -> outbound gate -> dispatch or approval queue.
+This is the **single entry point** for all modules that want to execute actions. It wraps the full pipeline: context assembly -> policy evaluation -> outbound gate -> dispatch or approval queue. Pass `dry_run: true` for policy testing without side effects.
 
 #### Approval Status Query
 
@@ -108,8 +102,9 @@ dispatchAction(action: OpenCaptainAction) -> ActionResult
 #### From Identity & Permission Engine (Module 2):
 
 ```
+resolveIdentity(ref: PlatformRef | EmailRef) -> UnifiedIdentity?
 resolveGroup(group_ref: UnifiedGroupRef) -> ResolvedGroup
-isWhitelistedMember(identity: UnifiedIdentity, whitelist_dl: UnifiedGroupRef) -> bool
+  — Whitelist membership is checked as: resolveGroup(whitelist_dl).members.contains(identity)
 canAccess(agent_or_user: UnifiedIdentity, resource: ResourceRef, action: ActionType) -> PermissionResult
 getEffectiveScope(agent: UnifiedIdentity, platform: Platform) -> EffectiveScope
 ```
@@ -122,14 +117,11 @@ writeArtifact(artifact: LayerAArtifact) -> ArtifactId
 
 queryAuthorizations(scope: AuthorizationScope) -> AuthorizationRecord[]
   — Query active authorizations from Layer A for the Authorization Store cache
-```
 
-#### From Meeting Participation Engine (Module 5):
-
-```
-getMeetingState(meeting_id: string) -> MeetingState
-  — Context Assembler retrieves meeting participant count, hand-raise status,
-    and called-upon state for evaluating meeting behavior policy rules
+queryArtifacts(query: ArtifactQuery) -> LayerAArtifact[]
+  — Context Assembler queries MEETING_STATE artifacts to get participant count,
+    hand-raise status, and called-upon state for evaluating meeting policy rules.
+    Replaces the former getMeetingState() call to Module 5, breaking the circular dependency.
 ```
 
 #### From Audit & Observability Layer (Module 7):

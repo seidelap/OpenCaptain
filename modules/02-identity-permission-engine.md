@@ -20,10 +20,10 @@ Resolve user and group identities across all connected platforms into a unified 
 
 | Consumer | What It Uses | Why |
 |---|---|---|
-| **Platform Integration Layer (Module 1)** | `resolveIdentity()`, `getGroupMembers()` | Adapters call this module during event normalization to translate platform-specific user IDs into unified identities |
-| **Policy & Governance Engine (Module 3)** | `resolveGroup()`, `canAccess()`, `getEffectiveScope()`, `isWhitelistedMember()` | The Policy Engine's Context Assembler calls this module to determine group memberships, whitelist status, and effective permissions when evaluating proposed actions |
+| **Platform Integration Layer (Module 1)** | `resolveIdentity()`, `resolveGroup()` | Adapters call this module during event normalization to translate platform-specific user IDs into unified identities and resolve group membership |
+| **Policy & Governance Engine (Module 3)** | `resolveIdentity()`, `resolveGroup()`, `canAccess()`, `getEffectiveScope()` | The Policy Engine's Context Assembler calls this module to resolve identities, determine group memberships (including whitelist checks via `resolveGroup()`) and verify effective permissions |
 | **Meeting Participation Engine (Module 5)** | `resolveIdentity()`, `resolveGroup()` | Meeting engine resolves participant identities and checks meeting organizer/participant group memberships |
-| **Team Goal Engine (Module 6)** | `resolveIdentity()`, `getTeamMembers()` | Goal engine resolves task assignees and checks team membership to scope its work tracker |
+| **Team Goal Engine (Module 6)** | `resolveIdentity()`, `resolveGroup()` | Goal engine resolves task assignees and checks team membership via `resolveGroup(team_dl).members` |
 | **Audit & Observability Layer (Module 7)** | `resolveIdentity()` | Audit layer resolves actor identities for display in compliance reports and dashboards |
 
 ---
@@ -35,19 +35,14 @@ Resolve user and group identities across all connected platforms into a unified 
 #### Identity Resolution
 
 ```
-resolveIdentity(platform: Platform, platform_user_id: string) -> UnifiedIdentity?
+resolveIdentity(ref: PlatformRef | EmailRef) -> UnifiedIdentity?
   Inputs:
-    platform            — source platform (SLACK, TEAMS, JIRA, etc.)
-    platform_user_id    — platform-native user identifier
+    ref                 — either { platform: Platform, user_id: string }
+                          or { email: string }
+                          (email is the primary cross-platform join key)
   Returns:
     UnifiedIdentity { unified_id, display_name, email, platform_ids: Map<Platform, string>, org_unit?, role? }
     or null if no mapping exists
-
-resolveIdentityByEmail(email: string) -> UnifiedIdentity?
-  Inputs:
-    email               — email address as cross-platform join key
-  Returns:
-    UnifiedIdentity or null
 ```
 
 #### Group Resolution
@@ -55,28 +50,18 @@ resolveIdentityByEmail(email: string) -> UnifiedIdentity?
 ```
 resolveGroup(group_ref: UnifiedGroupRef) -> ResolvedGroup
   Inputs:
-    group_ref           — unified group reference (may be platform-specific group ID or unified group ID)
+    group_ref           — unified group reference (platform-specific group ID, unified group ID,
+                          team DL, or whitelist DL — all groups use the same interface)
   Returns:
-    ResolvedGroup { group_id, display_name, members: UnifiedIdentity[], nested_groups: UnifiedGroupRef[], platform_refs: Map<Platform, string> }
+    ResolvedGroup {
+      group_id, display_name,
+      members: UnifiedIdentity[],        // flat list, nested groups fully expanded
+      nested_groups: UnifiedGroupRef[],
+      platform_refs: Map<Platform, string>
+    }
 
-getGroupMembers(group_ref: UnifiedGroupRef) -> UnifiedIdentity[]
-  Inputs:
-    group_ref           — unified group reference
-  Returns:
-    Flat list of all member identities (nested groups fully expanded)
-
-getTeamMembers(team_dl: UnifiedGroupRef) -> UnifiedIdentity[]
-  Inputs:
-    team_dl             — the team distribution list reference
-  Returns:
-    All members of the team DL, used by Goal Engine and Policy Engine for team scoping
-
-isWhitelistedMember(identity: UnifiedIdentity, whitelist_dl: UnifiedGroupRef) -> bool
-  Inputs:
-    identity            — the user to check
-    whitelist_dl        — the whitelisted team DL
-  Returns:
-    true if the identity is a member of the whitelist group (directly or via nesting)
+  Usage note: Callers check membership themselves: resolveGroup(whitelist_dl).members.contains(identity)
+  Team and whitelist DLs are ordinary groups — no special-purpose methods needed.
 ```
 
 #### Permission Checking

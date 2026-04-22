@@ -36,20 +36,17 @@ The agent's memory system, implementing the three-layer A/B/C model. **Layer A**
 ```
 writeArtifact(artifact: LayerAArtifact) -> ArtifactId
   Inputs:
-    artifact            — raw source data (transcript, message, ticket, approval, ACL snapshot, etc.)
-                          with required metadata: source_platform, author_id, timestamp, artifact_type
+    artifact            — raw source data with required metadata: source_platform, author_id,
+                          timestamp, artifact_type
+                          artifact_type includes: TRANSCRIPT | MESSAGE | TICKET | APPROVAL |
+                          DECISION | ACL_SNAPSHOT | CALENDAR_EVENT | MEETING_STATE
+                          MEETING_STATE artifacts are written by the Meeting Engine on every
+                          state transition and queried by the Policy Engine's Context Assembler.
   Returns:
     ArtifactId (stable, immutable reference)
 
   Behavior: Append-only. If an artifact with the same external reference exists, a new version is
   created — the original is never overwritten. W3C PROV provenance edges are auto-generated.
-
-getArtifact(artifact_id: ArtifactId, version: VersionRef?) -> LayerAArtifact
-  Inputs:
-    artifact_id         — stable artifact reference
-    version             — optional; defaults to latest. Can specify exact version or "as_of" timestamp.
-  Returns:
-    The artifact at the requested version
 
 queryArtifacts(query: ArtifactQuery) -> LayerAArtifact[]
   Inputs:
@@ -79,16 +76,6 @@ writeClaim(claim: LayerBClaim) -> ClaimId
   Behavior: On insertion, automatically runs contradiction detection against existing claims in
   the same scope/topic. If conflicts found, creates "contradicts" edges — never auto-promotes
   to "supersedes" without governance evidence.
-
-writeRelationship(source: ClaimId, target: ClaimId, rel_type: RelationshipType, evidence: ArtifactId?) -> void
-  Inputs:
-    source, target      — the two claims being related
-    rel_type            — supports | contradicts | supersedes | clarifies | narrows |
-                          depends_on | same_as | approved_by | rejected_by
-    evidence            — optional Layer A artifact that justifies this relationship
-  
-  Behavior: "supersedes" requires a non-null evidence parameter pointing to a governance artifact
-  (decision record, ADR, explicit approval) in Layer A. Without evidence, the write is rejected.
 
 queryClaimsForTopic(topic: string, scope: ClaimScope?, as_of: timestamp?) -> ClaimSet
   Inputs:
@@ -143,18 +130,6 @@ generateContextPack(query: ContextQuery) -> LayerCArtifact
   retrieved, which were eligible but not retrieved, and any truncation in the retrieval manifest.
   Applies epistemic labeling to the output.
 
-getCachedArtifact(c_id: string) -> LayerCArtifact?
-  Inputs:
-    c_id                — Layer C artifact ID
-  Returns:
-    The cached artifact if still valid (not invalidated, not expired)
-
-promoteToA(c_id: string, approver: UnifiedIdentity) -> ArtifactId
-  Inputs:
-    c_id                — Layer C artifact to promote
-    approver            — human who approved the promotion
-  Returns:
-    New Layer A ArtifactId with full derivation lineage from the C artifact
 ```
 
 #### Extraction Pipeline
@@ -167,16 +142,8 @@ ingestTranscript(transcript: TranscriptChunk, meeting_id: string) -> ArtifactId
   Returns:
     Layer A artifact ID for the ingested transcript chunk
 
-  Side effect: Triggers async claim extraction pipeline (A -> B)
-
-triggerExtraction(artifact_id: ArtifactId) -> ExtractionJobId
-  Inputs:
-    artifact_id         — Layer A artifact to extract claims from
-  Returns:
-    Job ID for tracking the async extraction
-  
-  Behavior: LLM-based pipeline performs: claim extraction, NER, entity resolution,
-  relation extraction, contradiction detection against existing B graph
+  Side effect: Triggers async claim extraction pipeline (A -> B) internally.
+  External callers do not need to trigger extraction separately.
 ```
 
 ### 3.2 Required Interfaces (This Module Consumes)
@@ -195,7 +162,7 @@ getKnowledgeConfig() -> KnowledgeConfig
   — Returns extraction pipeline parameters, C artifact TTLs, invalidation sensitivity,
     graph partitioning settings, retention policies
 
-onConfigChanged(callback: (change: ConfigChange) -> void) -> void
+onConfigChanged(callback: (change: ConfigChange) -> void) -> SubscriptionHandle
   — Subscribe to config changes affecting knowledge store behavior
 ```
 

@@ -12,7 +12,7 @@ Provide normalized, bidirectional interfaces to each supported platform (Slack, 
 
 | Dependency | What It Needs | Why |
 |---|---|---|
-| **Identity & Permission Engine (Module 2)** | `resolveIdentity()`, `getGroupMembers()` | When translating platform events, the adapter needs to resolve platform-specific user IDs (e.g., Slack `U01ABC`) into unified OpenCaptain identity references so downstream consumers get consistent identities |
+| **Identity & Permission Engine (Module 2)** | `resolveIdentity()`, `resolveGroup()` | When translating platform events, the adapter needs to resolve platform-specific user IDs into unified OpenCaptain identity references, and resolve group membership for ACL queries |
 | **Configuration & Admin Interface (Module 8)** | `getPlatformConfig()`, `getAdapterSettings()` | Each adapter needs its OAuth credentials, enabled/disabled status, rate limit overrides, and per-platform settings from the central config store |
 
 ### 2.2 Modules That Depend On This Module
@@ -86,11 +86,11 @@ getAdapterHealth(platform: Platform) -> AdapterHealth
 #### From Identity & Permission Engine (Module 2):
 
 ```
-resolveIdentity(platform: Platform, platform_user_id: string) -> UnifiedIdentity?
+resolveIdentity(ref: PlatformRef | EmailRef) -> UnifiedIdentity?
   — Called during event normalization to attach unified identity to sender/participant fields
 
-getGroupMembers(group_ref: UnifiedGroupRef) -> UnifiedIdentity[]
-  — Called when adapter needs unified identity list for a platform group
+resolveGroup(group_ref: UnifiedGroupRef) -> ResolvedGroup
+  — Called when adapter needs unified identity list for a platform group; use .members for flat list
 ```
 
 #### From Configuration & Admin Interface (Module 8):

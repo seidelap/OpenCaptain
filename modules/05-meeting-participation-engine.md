@@ -15,16 +15,13 @@ Manages the agent's real-time behavior during meetings: listening, deciding when
 | **Platform Integration Layer (Module 1)** | Inbound meeting events via EventBus (`MeetingStarted`, `MeetingEnded`, `ParticipantJoined`, `ParticipantLeft`, `HandRaiseDetected`, `CalledUpon`, `MessageReceived` in meeting context) | The engine receives all meeting lifecycle and interaction events to maintain meeting state and detect contribution opportunities |
 | **Identity & Permission Engine (Module 2)** | `resolveIdentity()`, `resolveGroup()` | Resolves meeting participant identities and checks organizer/participant group memberships for policy context |
 | **Policy & Governance Engine (Module 3)** | `submitAction()` | Every proposed action (RaiseHand, Speak) is submitted to the Policy Engine for evaluation. The engine never dispatches actions directly. |
-| **Knowledge Store (Module 4)** | `ingestTranscript()`, `queryClaimsForTopic()`, `getContradictions()`, `generateContextPack()` | Ingests real-time transcripts into Layer A; queries Layer B for relevant claims, contradictions, and commitments; requests Layer C context packs for contribution composition |
+| **Knowledge Store (Module 4)** | `ingestTranscript()`, `writeArtifact()`, `queryClaimsForTopic()`, `getContradictions()`, `generateContextPack()` | Ingests transcripts and writes meeting state artifacts to Layer A; queries Layer B for relevant claims, contradictions, and commitments; requests Layer C context packs |
+| **Audit & Observability Layer (Module 7)** | `logEvent()` | Pushes telemetry (meeting state transitions, contribution attempts, delivery outcomes, latency) to the immutable audit log |
 | **Configuration & Admin Interface (Module 8)** | `getMeetingConfig()` | Meeting behavior thresholds (small meeting threshold, contribution relevance threshold, devils advocate toggle, hand-raise rate limits) |
 
 ### 2.2 Modules That Depend On This Module
 
-| Consumer | What It Uses | Why |
-|---|---|---|
-| **Audit & Observability Layer (Module 7)** | Meeting participation telemetry | Logs meeting join/leave, contribution attempts (proposed, delivered, suppressed), state transitions, and latency metrics |
-
-*Note: No other module directly depends on the Meeting Engine's interfaces. It is a leaf consumer that reads from the Knowledge Store and proposes actions to the Policy Engine.*
+*None. The Meeting Engine is a true leaf consumer — it reads from other modules and pushes events outward. No module calls into it.*
 
 ---
 
@@ -32,33 +29,7 @@ Manages the agent's real-time behavior during meetings: listening, deciding when
 
 ### 3.1 Provided Interfaces (This Module Exposes)
 
-#### Meeting State Query (for Audit/Observability and Policy Engine context)
-
-```
-getMeetingState(meeting_id: string) -> MeetingState
-  Inputs:
-    meeting_id          — platform-qualified meeting identifier
-  Returns:
-    MeetingState {
-      meeting_id, platform, status: IDLE | LISTENING | CONTRIBUTION_QUEUED | HAND_RAISED | SPEAKING,
-      participants: ParticipantInfo[],
-      participant_count: number,
-      current_speaker: UnifiedIdentity?,
-      agent_hand_raised: bool,
-      agent_was_called_upon: bool,
-      current_topic: string?,
-      agenda_position: number?,
-      started_at: timestamp,
-      contributions_made: number,
-      contributions_suppressed: number
-    }
-
-getActiveMeetings() -> MeetingState[]
-  Returns:
-    All meetings the agent is currently participating in
-```
-
-The Policy Engine's Context Assembler calls `getMeetingState()` to build evaluation context when checking meeting-related policy rules (e.g., participant count for hand-raise requirements).
+*None. This module is a leaf consumer. Meeting state is written to the Knowledge Store (Layer A) as `MEETING_STATE` artifacts on every state change — the Policy Engine and Audit Layer read from there.*
 
 ### 3.2 Required Interfaces (This Module Consumes)
 
@@ -86,9 +57,20 @@ submitAction(proposed_action: ProposedAction, source_module: MEETING_ENGINE) -> 
 
 ```
 ingestTranscript(transcript: TranscriptChunk, meeting_id: string) -> ArtifactId
+writeArtifact(artifact: LayerAArtifact) -> ArtifactId
+  — Writes MEETING_STATE artifacts on every state transition (participant count, hand-raise
+    status, called-upon status, agent behavioral state). This replaces the former
+    getMeetingState() pull interface — consumers read state from Module 4 instead.
 queryClaimsForTopic(topic: string, scope: ClaimScope?, as_of: timestamp?) -> ClaimSet
 getContradictions(scope: ClaimScope?, topic: string?) -> ConflictPair[]
 generateContextPack(query: ContextQuery) -> LayerCArtifact
+```
+
+#### From Audit & Observability Layer (Module 7):
+
+```
+logEvent(entry: AuditLogEntry) -> AuditLogId
+  — Push meeting telemetry: state transitions, contribution decisions, delivery outcomes, latency
 ```
 
 #### From Configuration & Admin Interface (Module 8):

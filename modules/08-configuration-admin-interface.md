@@ -12,8 +12,8 @@ Allow administrators to author policies, manage whitelists, tune thresholds, and
 
 | Dependency | What It Needs | Why |
 |---|---|---|
-| **Policy & Governance Engine (Module 3)** | `validatePolicyRule()` | When admins author or modify policy rules, this module calls the Policy Engine to validate them before persisting |
-| **Audit & Observability Layer (Module 7)** | `queryAuditLog()`, `getComplianceReport()`, `getDashboardData()` | The Admin Interface surfaces audit data, dashboards, and compliance reports to administrators |
+| **Policy & Governance Engine (Module 3)** | `validatePolicyRule()`, `submitAction(dry_run: true)` | Validates new policy rules and tests them against hypothetical actions before persisting |
+| **Audit & Observability Layer (Module 7)** | `queryAuditLog()`, `getComplianceReport()`, `getDashboardData()`, `subscribeToAlerts()` | Surfaces audit data, compliance reports, dashboards, and real-time alerts to administrators |
 
 ### 2.2 Modules That Depend On This Module
 
@@ -189,6 +189,10 @@ All modules subscribe to `onConfigChanged()` so they can react to live configura
 ```
 validatePolicyRule(rule: PolicyRule) -> ValidationResult
   — Validates rule syntax, semantics, and checks for conflicts with existing rules
+
+submitAction(proposed_action: ProposedAction, source_module: ADMIN, dry_run: true) -> ActionOutcome
+  — Used to test policy rule changes: run a hypothetical action through the policy engine
+    without dispatching it, to verify the new rules produce the expected verdicts
 ```
 
 #### From Audit & Observability Layer (Module 7):
@@ -197,6 +201,8 @@ validatePolicyRule(rule: PolicyRule) -> ValidationResult
 queryAuditLog(query: AuditQuery) -> AuditLogEntry[]
 getComplianceReport(report_type: ReportType, time_range: TimeRange, scope: ReportScope?) -> ComplianceReport
 getDashboardData(dashboard: DashboardType) -> DashboardData
+subscribeToAlerts(alert_types: AlertType[], callback: (alert: Alert) -> void) -> SubscriptionHandle
+  — Admin UI subscribes to real-time alerts for display in the dashboard
 logEvent(entry: AuditLogEntry) -> AuditLogId
   — All config changes are logged as audit events
 ```
