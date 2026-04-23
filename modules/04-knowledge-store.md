@@ -39,7 +39,8 @@ writeArtifact(artifact: LayerAArtifact) -> ArtifactId
     artifact            — raw source data with required metadata: source_platform, author_id,
                           timestamp, artifact_type
                           artifact_type includes: TRANSCRIPT | MESSAGE | TICKET | APPROVAL |
-                          DECISION | ACL_SNAPSHOT | CALENDAR_EVENT | MEETING_STATE
+                          DECISION | ACL_SNAPSHOT | CALENDAR_EVENT | MEETING_STATE |
+                          OUTREACH_SENT | AUTHORIZATION_GRANTED | AUTHORIZATION_DENIED
                           MEETING_STATE artifacts are written by the Meeting Engine on every
                           state transition and queried by the Policy Engine's Context Assembler.
   Returns:
@@ -104,8 +105,19 @@ queryAuthorizations(scope: AuthorizationScope) -> AuthorizationRecord[]
   Inputs:
     scope               — filter by action scope, target scope, expiry status
   Returns:
-    Active AuthorizationRecords stored as governance artifacts in Layer A,
-    indexed for fast query by the Authorization Store
+    Active AUTHORIZATION_GRANTED artifacts from Layer A, shaped as AuthorizationRecord
+    for the Authorization Store cache rebuild
+
+queryOutreachRequests(regarding: EntityId, status: OutreachStatus?) -> OutreachRequest[]
+  Inputs:
+    regarding           — entity (Blocker, WorkItem, Claim, PendingAction) this outreach concerns
+    status              — optional filter: OPEN | RESPONDED | CANCELLED
+  Returns:
+    OutreachRequest nodes linked to this entity, ordered by last_sent_at desc
+
+writeOutreachRequest(request: OutreachRequest) -> OutreachRequestId
+updateOutreachRequest(id: OutreachRequestId, patch: OutreachRequestPatch) -> void
+  — Create and update OutreachRequest nodes. Policy Engine is the only caller.
 ```
 
 #### Layer C — Thoughts Cache Operations
@@ -201,13 +213,13 @@ For each extracted claim: creates a Layer B claim node with `grounded_in` links 
 **What it does:**
 Executes retrieval over Layers A and B for content matching the query. Constructs a **retrieval manifest** recording: every source retrieved (artifact IDs, claim IDs, versions), every source that was eligible but not retrieved (and why — token limit, relevance cutoff), any truncation applied, and the time/token budget consumed. Applies governance rules to resolve conflicts: if contradicting claims exist without a supersession, both are preserved and labeled. Generates the output with epistemic labels attached to every assertion. Assigns a confidence score based on source coverage and conflict density. Returns the full Layer C artifact with manifest — no C artifact can exist without a retrieval manifest.
 
-### 4.4 `detectContradiction(new_claim: LayerBClaim) -> ConflictPair[]`
+### 4.4 `detectRelationships(new_claim: LayerBClaim) -> RelatedPair[]`
 
 **Inputs:**
 - `new_claim` — a newly extracted or inserted claim
 
 **What it does:**
-Queries the B graph for existing claims that share the same subject/topic/scope. Uses semantic similarity and logical consistency checks to identify potential conflicts. For each conflict: creates a `contradicts` edge between the new claim and the existing claim. **Critical invariant:** `contradicts` never auto-promotes to `supersedes`. Supersession requires explicit governance evidence from Layer A (a decision record, an ADR, an approved resolution). Returns the list of detected conflict pairs for upstream consumers (Goal Engine, Meeting Engine).
+Queries the B graph for existing claims that share the same subject/topic/scope. Uses semantic similarity and logical consistency checks to identify related claims — including direct conflicts, narrower/broader scope, and informational connections. For each detected relationship: creates a `relates_to` edge between the new claim and the existing claim. **Critical invariant:** `relates_to` never auto-promotes to `supersedes`. Supersession requires explicit governance evidence from Layer A (a decision record, an ADR, an approved resolution). Returns the list of related pairs for upstream consumers (Policy Engine, Goal Engine, Meeting Engine). The Policy Engine then evaluates each pair to determine whether the acknowledgement gap and context warrant outreach.
 
 ### 4.5 `resolveSupersession(superseding: ClaimId, superseded: ClaimId, evidence: ArtifactId) -> void`
 
@@ -237,7 +249,8 @@ Identifies all Layer C artifacts that depend on the changed source (via retrieva
 LayerAArtifact {
   artifact_id: ArtifactId (stable UUID)
   version: number (monotonically increasing)
-  artifact_type: TRANSCRIPT | MESSAGE | TICKET | APPROVAL | DECISION | ACL_SNAPSHOT | CALENDAR_EVENT
+  artifact_type: TRANSCRIPT | MESSAGE | TICKET | APPROVAL | DECISION | ACL_SNAPSHOT | CALENDAR_EVENT |
+               MEETING_STATE | OUTREACH_SENT | AUTHORIZATION_GRANTED | AUTHORIZATION_DENIED
   source_platform: Platform
   author_id: UnifiedIdentity
   content: any
@@ -259,7 +272,7 @@ LayerBClaim {
   subject: EntityId
   predicate: string
   object: any
-  grounded_in: ArtifactId[]               // must be non-empty
+  grounded_in: GroundedInRef[]             // must be non-empty
   epistemic_status: ASSERTED | COMMITTED | DECIDED | SPECULATED | RETRACTED
   valid_from: timestamp
   valid_until: timestamp?
@@ -268,19 +281,65 @@ LayerBClaim {
 }
 ```
 
+### GroundedInRef
+
+```
+GroundedInRef {
+  artifact_id: ArtifactId
+  position: ASSERTS | AGREES | UNCERTAIN | DISAGREES
+}
+```
+
+`ASSERTS` — the artifact's author is making this claim directly.
+`AGREES` / `DISAGREES` / `UNCERTAIN` — the author is expressing a stance toward an existing claim. Multiple authors can each have a `grounded_in` ref on the same claim with different positions.
+
+### OutreachRequest
+
+```
+OutreachRequest {
+  outreach_id: OutreachRequestId (stable UUID)
+  status: OPEN | RESPONDED | CANCELLED
+  attempt_count: int
+  last_sent_at: timestamp
+  // edges (not inline fields):
+  //   regarding  →  Entity | Claim
+  //   targets    →  Identity
+  //   grounded_in → OUTREACH_SENT artifact per attempt
+}
+```
+
+Policy Engine is the only writer. Escalation is not a status — it is a new `OutreachRequest` with a different `targets` identity, linked by sharing the same `regarding` target.
+
 ### Layer B Relationship Types
 
-| Type | Meaning | Requires Evidence |
+**Claim-to-claim:**
+
+| Type | Evidence required | Behavioral consequence |
 |---|---|---|
-| `supports` | Corroborating claim | No |
-| `contradicts` | Conflicting claim — not yet resolved | No |
-| `supersedes` | Replaces a previous claim | **Yes** — governance artifact in Layer A required |
-| `clarifies` | Adds detail to an existing claim | No |
-| `narrows` | Restricts scope of an existing claim | No |
-| `depends_on` | Dependency relationship | No |
-| `same_as` | Entity deduplication link | No |
-| `approved_by` | Governance approval link | Yes — AuthorizationRecord |
-| `rejected_by` | Governance rejection link | Yes — AuthorizationRecord |
+| `relates_to` | No | Flags the pair for Policy evaluation of acknowledgement gap; most edges result in no action |
+| `supersedes` | **Yes** — Layer A governance artifact | Sets `valid_until` on old claim; triggers Layer C invalidation |
+
+**Entity-to-entity:**
+
+| Type | Notes |
+|---|---|
+| `depends_on` | Dependency relationship |
+| `same_as` | Deduplication / entity merge link |
+
+**Crosses layers (B → A), used on both `Claim` and `OutreachRequest` nodes:**
+
+| Type | Carries | Constraint |
+|---|---|---|
+| `grounded_in` | `GroundedInRef` with position field | Must be non-empty on every Claim |
+
+**OutreachRequest edges:**
+
+| Type | To | Notes |
+|---|---|---|
+| `regarding` | Entity \| Claim | Determines downstream behavior when status → RESPONDED |
+| `targets` | Entity (Identity) | Who the agent is waiting on |
+
+**Dropped:** `supports`, `contradicts`, `clarifies`, `narrows`, `approved_by`, `rejected_by` — collapsed into `relates_to` and `grounded_in` positions. Temporal evolution (same-author claim updates) is handled by timestamps and `grounded_in` artifacts; no named edge required.
 
 ### Layer C Artifact
 

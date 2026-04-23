@@ -132,6 +132,8 @@ This is the Action Decision Engine. Given a detected issue, determines what acti
 
 For every proposed action: attaches epistemic labels to the content ("Two different requirements have been stated for this task...", "This dependency may be at risk..."). Never adjudicates disagreements — always surfaces both sides. Submits the proposed action to the Policy Engine via `submitAction()`.
 
+**Deduplication** is not handled here. The Policy Engine's `assembleContext()` queries the Knowledge Store for any open `OutreachRequest` regarding the same blocker before deciding whether to dispatch, wait, or deny. The Goal Engine does not track outreach state directly.
+
 ### 4.5 `generateGoalBrief(team_dl: UnifiedGroupRef) -> LayerCArtifact`
 
 **Inputs:**
