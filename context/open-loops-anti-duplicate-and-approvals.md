@@ -43,52 +43,111 @@ This keeps “what do the rules say?” separate from “what is the status of *
 
 - Module 6’s **`decideAction` → `submitAction`** flow does **not** yet fully specify how to **avoid repeating** the same nudge (blocker surface, reminder, “two requirements” post, access request) on every `detectBlockers()` run.
 - **Existing hooks:** `Blocker.resolved`, **B graph** changes (`supersedes`, ticket updates), `syncWorkItems` “previous state” — help when the *world* changes; they do not alone solve “same open issue, many evaluation cycles.”
-- **Needed (design intent):** durable **outreach / coordination** state, e.g. per **stable fingerprint** of an issue: last nudge time, count, link to last outbound or Layer A `GOAL_INTERVENTION` (name TBD), **cooldowns** and caps from `getGoalEngineConfig()`.
-- **Policy** can **DENY** ill-formed duplicates in theory, but **dedup policy** should be computed in the **decision + store** path, not duplicated as static policy YAML for every case.
+- **Resolution (decided):** dedup is handled by the **Policy Engine evaluating graph state**, not by a timestamp field or static policy YAML. Before re-sending, `assembleContext()` queries the Knowledge Store for any `OutreachRequest` node linked to the same fingerprint and includes its full context (attempt count, status, recipient activity signals, blocker severity). Policy rules evaluate that context and DENY if re-sending isn’t appropriate. This allows arbitrarily complex re-outreach logic — not just “has the cooldown expired?” but e.g. “severity dropped,” “higher-priority item already open for this person,” “recipient showed partial signal.”
+- **No separate dedup store needed.** The graph is the source of truth.
 
 ---
 
 ## 6. Shared machinery: approvals, nudges, clarifications
 
-**Hypothesis (to validate in a later pass):** the same **“open loop”** and **anti-duplicate** substrate can back:
+**Confirmed (no longer a hypothesis):** the same **`OutreachRequest`** pattern backs all three cases:
 
 - **Approval / authorization** pending and satisfied states  
 - **Goal engine** interventions (blockers, sync suggestions, stale commitments)  
 - **Clarification** and other “waiting on a human (or agent)” states  
 
-**Not** that every case uses identical schema — but the **discipline** is shared: *durable record, id/correlation, status machine, don’t re-send until rules say so*.
+**The pattern:** a graph-resident `OutreachRequest` node in the Knowledge Store, with the immutable record of what was sent in **Layer A** and the status + relationships as **Layer B** claims pointing back to it. `AuthorizationRecord` in Module 3 is already this pattern for the approval case; `OutreachRequest` extends it to nudges and clarifications.
+
+**Layer split:**
+- **Layer A** — immutable record of what was sent (auditable, append-only)
+- **Layer B** — status (`OPEN` | `RESPONDED` | `ESCALATED` | `CANCELLED`) and graph edges to the blocker, work item, and target identity
+
+**Not** that every case uses identical schema — but the **discipline** is shared: *durable record, id/correlation, status machine, Policy evaluates graph state before re-sending*.
 
 ---
 
-## 7. Open design question: “questions raised but unanswered”
+## 7. Graph schema (settled)
 
-**Idea to explore next session:** a first-class (or near-first-class) object for **questions / obligations** that are **unresolved** because:
+### Node types
 
-- the **owner of the answer** has not responded yet, or  
-- someone explicitly said **“more time needed”** (and optionally a new expectation of when to follow up)  
+**Layer A — one node type:** `Artifact`, discriminated by `artifact_type`:
 
-**Parties** may include **users A/B** and the **agent** as asker *or* as the party expected to answer (depending on flow).
+| artifact_type | What it records |
+|---|---|
+| TRANSCRIPT, MESSAGE, TICKET | Platform events, raw source |
+| DECISION, MEETING_STATE | Governance and meeting records |
+| OUTREACH_SENT | Immutable record of a message the agent sent |
+| AUTHORIZATION_GRANTED, AUTHORIZATION_DENIED | Approval outcomes (replaces standalone `AuthorizationRecord`) |
+| ACL_SNAPSHOT, CALENDAR_EVENT | Identity and scheduling records |
 
-**Possible states (sketch, not final):** `OPEN` | `ANSWERED` | `MORE_TIME` | `TIMEOUT` | `CANCELLED` — exact names and transitions TBD.
+W3C PROV edges only (`wasAttributedTo`, `wasGeneratedBy`, `wasDerivedFrom`). Never point into Layer B.
 
-**Use cases:** reduce duplicate “did you see this?” / duplicate approvals / duplicate blocker pings; support honest “I’ll get back by Friday”; unify mental model with pending approvals where appropriate.
+**Layer B — three node types:**
 
-This is **intentionally unfinished**; it should be refined against:
+| Node | What it holds |
+|---|---|
+| `Entity` | Identity, WorkItem, Blocker, Team — subjects and objects of claims |
+| `Claim` | Subject-predicate-object world-state assertion |
+| `OutreachRequest` | Agent communication state: `status` (OPEN \| RESPONDED \| CANCELLED), `attempt_count`, `last_sent_at` |
 
-- platform threading and identity (Module 1)  
-- Knowledge Store artifacts (Module 4)  
-- Policy and governance (Module 3)  
-- Team Goal and Meeting engines (5 & 6)  
+Escalation is not a status on `OutreachRequest` — it is a new `OutreachRequest` targeting a different identity, linked by sharing the same `regarding` target.
+
+### Edge types
+
+**Claim-to-claim:**
+
+| Edge | Evidence required | Behavioral consequence |
+|---|---|---|
+| `relates_to` | No | Flags the pair for Policy evaluation; most edges result in silence |
+| `supersedes` | Yes — Layer A governance artifact | Sets `valid_until` on old claim; triggers Layer C invalidation |
+
+**Entity-to-entity:**
+
+| Edge | Notes |
+|---|---|
+| `depends_on` | Dependency relationship |
+| `same_as` | Deduplication link |
+
+**OutreachRequest edges:**
+
+| Edge | To | Notes |
+|---|---|---|
+| `regarding` | Entity \| Claim | Target type determines downstream behavior on RESPONDED |
+| `targets` | Identity | Who the agent is waiting on |
+
+**Crosses layers (B → A only):**
+
+| Edge | Carries | Notes |
+|---|---|---|
+| `grounded_in` | position: ASSERTS \| AGREES \| UNCERTAIN \| DISAGREES | Used on both `Claim` and `OutreachRequest` nodes |
+
+**Dropped:** `supports`, `contradicts`, `clarifies`, `narrows`, `revises`, `approved_by`, `rejected_by` — collapsed into `relates_to` + `grounded_in` positions.
+
+### Temporal evolution
+
+No named edge. Active claim = most recent ASSERTS from an author with no `valid_until`. Timestamps and `grounded_in` artifacts capture the full history. `supersedes` handles formal governance decisions only.
+
+### Outreach trigger condition
+
+`relates_to` + silence is the default — most edges never generate outreach. An `OutreachRequest` is created only when all three conditions are met:
+
+1. `relates_to` exists between claims from different authors
+2. At least one author lacks a `grounded_in` edge to the opposing claim (mutual acknowledgement gap)
+3. The claims require convergence in the current context (actionable, in scope, timely)
+
+Once both authors have `grounded_in` edges to each other’s claims, the conflict is mutually known — the appropriate response shifts from surfacing to resolution, which is a different kind of outreach or none at all.
 
 ---
 
 ## 8. Suggested follow-ups (when you resume)
 
-1. Name and place the **outreach** / **open-loop** record (Layer A types vs. small operational table vs. both).  
-2. Define **fingerprinting** for “same issue” (blocker, approval, clarification).  
-3. Specify **one** state machine for **authorizations** and **separate** (or branched) machine for **Q&A / clarification** if semantics differ.  
-4. Add a subsection to `modules/06-team-goal-engine.md` (and/or design.md) once the above is stable.  
-5. Reconcile with **scheduled reminder** events (wake without external webhook).
+1. ~~Name and place the outreach / open-loop record.~~ **Done:** `OutreachRequest` in Layer B; `OutreachSentRecord` as OUTREACH_SENT artifact in Layer A.
+2. ~~Reconcile with scheduled reminder events.~~ **Done:** Policy evaluates graph state. Optional `scheduleWakeEvent()` on Module 1 for precise timing only.
+3. ~~Flesh out graph schema.~~ **Done:** see §7.
+4. ~~Specify how `AuthorizationRecord` and `OutreachRequest` relate.~~ **Done:** `AuthorizationRecord` is now an AUTHORIZATION_GRANTED artifact in Layer A; `OutreachRequest` is the pending state in Layer B.
+5. **Next:** propagate graph schema to module specs — Module 4 (relationship types, data models), Module 3 (approval flow, AuthorizationRecord), Module 6 (dedup via OutreachRequest).
+6. Define **fingerprinting** for “same issue” — what stable identifier links multiple `OutreachRequest` nodes about the same blocker or approval?
+7. Work out what the `relates_to` detection algorithm looks like — what signals cause the extraction pipeline to create a `relates_to` edge, and what is the expected false-positive rate?
 
 ---
 

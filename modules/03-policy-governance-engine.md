@@ -169,7 +169,7 @@ Loads all active policy rules from the Policy Rule Store (sourced from Module 8)
 - `proposed_action` — the original action
 
 **What it does:**
-This is the Outbound Gate's core logic. If `ALLOW`: dispatches the action via the Platform Integration Layer's `dispatchAction()`. If the action was approved via an out-of-scope authorization, attaches admin CC per policy. Logs the dispatch to the Audit Layer. If `DENY`: discards the action. Logs the denial with the binding rule and reason. Returns the denial to the calling module. If `REQUIRE_APPROVAL`: forwards the action to the Approval Module's Pending Action Queue. Generates an approval request and sends it to the appropriate admin DL. Returns `PENDING_APPROVAL` status with the approval request ID.
+This is the Outbound Gate's core logic. If `ALLOW`: dispatches the action via the Platform Integration Layer's `dispatchAction()`. If the action was approved via an out-of-scope authorization, attaches admin CC per policy. Logs the dispatch to the Audit Layer. If `DENY`: discards the action. Logs the denial with the binding rule and reason. Returns the denial to the calling module. If `REQUIRE_APPROVAL`: creates an `OutreachRequest` node (Layer B) with `regarding` the PendingAction and `targets` the admin DL identity. Sends the approval request message, writing an OUTREACH_SENT artifact (Layer A) linked via `grounded_in` on the OutreachRequest. Returns `PENDING_APPROVAL` status with the outreach request ID.
 
 ### 4.4 `generateApprovalRequest(proposed_action: ProposedAction, verdict: PolicyVerdict) -> ApprovalRequest`
 
@@ -195,7 +195,7 @@ Uses LLM-based natural language parsing to extract the approval intent from the 
 - `pending_action` — the original pending action that was awaiting approval
 
 **What it does:**
-Converts the parsed approval into a structured `AuthorizationRecord` with all fields: approver identity, action scope (what actions are authorized), target scope (who can be contacted), duration/expiry, conditions (e.g., "admin must be CC'd"), observer list, and the source message ID that contained the approval. **Critical:** The AuthorizationRecord is created and written to Layer A *before* the authorized action executes. Writes the record to the Authorization Store (operational cache) and durably to Layer A via the Knowledge Store. Ensures the approval scope cannot exceed the original request scope (even if the admin says "approved for X and Y," only X is authorized if X was requested).
+Converts the parsed approval into an AUTHORIZATION_GRANTED (or AUTHORIZATION_DENIED) artifact written to Layer A. The artifact content carries: approver identity, action scope, target scope, duration/expiry, conditions, observer list, and the source message ID. **Critical:** the artifact is written to Layer A *before* the authorized action executes. Updates the Authorization Store cache. Marks the corresponding `OutreachRequest` as RESPONDED with a `grounded_in` ref to the new artifact. Ensures approval scope cannot exceed the original request scope.
 
 ### 4.7 `evaluateAgentToAgentAction(message: AgentMessage) -> PolicyVerdict`
 
@@ -228,6 +228,8 @@ Validates the `authority_chain` field is populated (rejects empty chains). Verif
 
 ### AuthorizationRecord
 
+`AuthorizationRecord` is the typed content of an AUTHORIZATION_GRANTED artifact in Layer A — not a standalone node type. `queryAuthorizations()` in Module 4 returns these by querying AUTHORIZATION_GRANTED artifacts and parsing their content.
+
 ```
 AuthorizationRecord {
   authorization_id: string (UUID)
@@ -240,7 +242,7 @@ AuthorizationRecord {
   observers: UnifiedIdentity[]
   created_at: timestamp
   approval_source_message_id: string       # provenance link to the chat message
-  pending_action_id: string                # link to the original request
+  outreach_request_id: string              # link to the OutreachRequest that initiated this
   status: ACTIVE | EXPIRED | REVOKED
 }
 ```
