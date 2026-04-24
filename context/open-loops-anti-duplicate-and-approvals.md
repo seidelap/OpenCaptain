@@ -118,7 +118,7 @@ Escalation is not a status on `OutreachRequest` — it is a new `OutreachRequest
 
 | Edge | Carries | Notes |
 |---|---|---|
-| `grounded_in` | position: ASSERTS \| AGREES \| UNCERTAIN \| DISAGREES | Used on both `Claim` and `OutreachRequest` nodes |
+| `grounded_in` | position: ASSERTS \| AGREES \| UNCERTAIN \| DISAGREES \| RETRACTS | Used on both `Claim` and `OutreachRequest` nodes. Current claim state is fully derivable from these positions — no separate `epistemic_status` field needed. |
 
 **Dropped:** `supports`, `contradicts`, `clarifies`, `narrows`, `supersedes`, `revises`, `approved_by`, `rejected_by` — collapsed into `relates_to` + `grounded_in` positions.
 

@@ -69,8 +69,8 @@ getProvenance(artifact_id: ArtifactId) -> ProvenanceGraph
 ```
 writeClaim(claim: LayerBClaim) -> ClaimId
   Inputs:
-    claim               — semantic claim with: subject, predicate, object, grounded_in (ArtifactId[]),
-                          epistemic_status, valid_from, scope
+    claim               — semantic claim with: subject, predicate, object, grounded_in (GroundedInRef[]),
+                          valid_from, scope
   Returns:
     ClaimId (stable URI)
 
@@ -263,7 +263,6 @@ LayerBClaim {
   predicate: string
   object: any
   grounded_in: GroundedInRef[]             // must be non-empty
-  epistemic_status: ASSERTED | COMMITTED | DECIDED | SPECULATED | RETRACTED
   valid_from: timestamp
   scope: ClaimScope                        // team, project, or global
   confidence: float?
@@ -275,12 +274,14 @@ LayerBClaim {
 ```
 GroundedInRef {
   artifact_id: ArtifactId
-  position: ASSERTS | AGREES | UNCERTAIN | DISAGREES
+  position: ASSERTS | AGREES | UNCERTAIN | DISAGREES | RETRACTS
 }
 ```
 
 `ASSERTS` — the artifact's author is making this claim directly.
-`AGREES` / `DISAGREES` / `UNCERTAIN` — the author is expressing a stance toward an existing claim. Multiple authors can each have a `grounded_in` ref on the same claim with different positions.
+`AGREES` / `DISAGREES` / `UNCERTAIN` — the author is expressing a stance toward an existing claim.
+`RETRACTS` — the author is withdrawing their prior ASSERTS or AGREES on this claim.
+Multiple authors can each have a `grounded_in` ref on the same claim with different positions. The current state of a claim is fully derivable from these positions — no separate `epistemic_status` field is needed.
 
 ### OutreachRequest
 
