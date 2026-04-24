@@ -96,10 +96,9 @@ Escalation is not a status on `OutreachRequest` — it is a new `OutreachRequest
 
 **Claim-to-claim:**
 
-| Edge | Evidence required | Behavioral consequence |
-|---|---|---|
-| `relates_to` | No | Flags the pair for Policy evaluation; most edges result in silence |
-| `supersedes` | Yes — Layer A governance artifact | Sets `valid_until` on old claim; triggers Layer C invalidation |
+| Edge | Notes |
+|---|---|
+| `relates_to` | Flags the pair for Policy evaluation; most edges result in silence |
 
 **Entity-to-entity:**
 
@@ -121,11 +120,11 @@ Escalation is not a status on `OutreachRequest` — it is a new `OutreachRequest
 |---|---|---|
 | `grounded_in` | position: ASSERTS \| AGREES \| UNCERTAIN \| DISAGREES | Used on both `Claim` and `OutreachRequest` nodes |
 
-**Dropped:** `supports`, `contradicts`, `clarifies`, `narrows`, `revises`, `approved_by`, `rejected_by` — collapsed into `relates_to` + `grounded_in` positions.
+**Dropped:** `supports`, `contradicts`, `clarifies`, `narrows`, `supersedes`, `revises`, `approved_by`, `rejected_by` — collapsed into `relates_to` + `grounded_in` positions.
 
 ### Temporal evolution
 
-No named edge. Active claim = most recent ASSERTS from an author with no `valid_until`. Timestamps and `grounded_in` artifacts capture the full history. `supersedes` handles formal governance decisions only.
+No named edge, no `valid_until` field. Active view = most recent ASSERTS from an author by timestamp. Full history is in the `grounded_in` artifacts. Explicit retraction uses `epistemic_status: RETRACTED` on the claim. `valid_until` can be added as a materialized cache field if query performance demands it, but is not part of the logical model.
 
 ### Outreach trigger condition
 
