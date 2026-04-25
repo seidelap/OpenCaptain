@@ -96,10 +96,9 @@ Escalation is not a status on `OutreachRequest` — it is a new `OutreachRequest
 
 **Claim-to-claim:**
 
-| Edge | Evidence required | Behavioral consequence |
-|---|---|---|
-| `relates_to` | No | Flags the pair for Policy evaluation; most edges result in silence |
-| `supersedes` | Yes — Layer A governance artifact | Sets `valid_until` on old claim; triggers Layer C invalidation |
+| Edge | Notes |
+|---|---|
+| `relates_to` | Flags the pair for Policy evaluation; most edges result in silence |
 
 **Entity-to-entity:**
 
@@ -119,13 +118,18 @@ Escalation is not a status on `OutreachRequest` — it is a new `OutreachRequest
 
 | Edge | Carries | Notes |
 |---|---|---|
-| `grounded_in` | position: ASSERTS \| AGREES \| UNCERTAIN \| DISAGREES | Used on both `Claim` and `OutreachRequest` nodes |
+| `grounded_in` | position: ASSERTS \| AGREES \| UNCERTAIN \| DISAGREES \| RETRACTS | Used on both `Claim` and `OutreachRequest` nodes. Current claim state is fully derivable from these positions — no separate `epistemic_status` field needed. |
 
-**Dropped:** `supports`, `contradicts`, `clarifies`, `narrows`, `revises`, `approved_by`, `rejected_by` — collapsed into `relates_to` + `grounded_in` positions.
+**Dropped:** `supports`, `contradicts`, `clarifies`, `narrows`, `supersedes`, `revises`, `approved_by`, `rejected_by` — collapsed into `relates_to` + `grounded_in` positions.
 
-### Temporal evolution
+### Claim versioning
 
-No named edge. Active claim = most recent ASSERTS from an author with no `valid_until`. Timestamps and `grounded_in` artifacts capture the full history. `supersedes` handles formal governance decisions only.
+`claim_id` is stable across versions; `version` is monotonically increasing. `grounded_in` refs live on a specific version — they are evidence for that version's content.
+
+- **New version:** content (object or predicate) materially changes. Anyone's evidence can produce a new version — no restriction to the original claimer. Extraction pipeline makes the judgment call.
+- **New `grounded_in` ref:** stance changes (AGREES, DISAGREES, RETRACTS) on existing content. No new version.
+- **Current version:** max version for a given `claim_id`.
+- **`relates_to` edges:** connect specific versions. Re-evaluated fresh on new version creation; prior-version edges preserved as history. Policy evaluates latest-version edges only.
 
 ### Outreach trigger condition
 

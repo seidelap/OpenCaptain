@@ -2,7 +2,7 @@
 
 ## 1. Purpose
 
-The agent's memory system, implementing the three-layer A/B/C model. **Layer A** is the immutable evidence/provenance layer (raw artifacts, governance records). **Layer B** is the semantic claims graph (entities, relationships, contradictions, supersessions). **Layer C** is the cached derived-views layer (meeting prep, context packs, query results). The Knowledge Store is the single source of truth for everything the agent knows, believes, and has been told — and it maintains full provenance and versioning so that any conclusion can be traced back to its sources.
+The agent's memory system, implementing the three-layer A/B/C model. **Layer A** is the immutable evidence/provenance layer (raw artifacts, governance records). **Layer B** is the semantic claims graph (versioned claims, entities, relationships, and grounded_in positions). **Layer C** is the cached derived-views layer (meeting prep, context packs, query results). The Knowledge Store is the single source of truth for everything the agent knows, believes, and has been told — and it maintains full provenance and versioning so that any conclusion can be traced back to its sources.
 
 ---
 
@@ -69,14 +69,15 @@ getProvenance(artifact_id: ArtifactId) -> ProvenanceGraph
 ```
 writeClaim(claim: LayerBClaim) -> ClaimId
   Inputs:
-    claim               — semantic claim with: subject, predicate, object, grounded_in (ArtifactId[]),
-                          epistemic_status, valid_from, scope
+    claim               — semantic claim with: subject, predicate, object, grounded_in (GroundedInRef[]),
+                          valid_from, scope
   Returns:
     ClaimId (stable URI)
 
-  Behavior: On insertion, automatically runs contradiction detection against existing claims in
-  the same scope/topic. If conflicts found, creates "contradicts" edges — never auto-promotes
-  to "supersedes" without governance evidence.
+  Behavior: If a claim with this claim_id already exists, a new version is created when the
+  content (object or predicate) has materially changed — otherwise a new grounded_in ref is
+  added to the current version. On insertion of a new version, automatically re-runs
+  relationship detection and creates fresh `relates_to` edges for the new version.
 
 queryClaimsForTopic(topic: string, scope: ClaimScope?, as_of: timestamp?) -> ClaimSet
   Inputs:
@@ -93,13 +94,14 @@ queryClaimsForEntity(entity_id: EntityId, scope: ClaimScope?) -> ClaimSet
   Returns:
     All claims involving this entity, with relationships and conflicts
 
-getContradictions(scope: ClaimScope?, topic: string?) -> ConflictPair[]
+getRelatedClaims(entity_id: EntityId?, topic: string?, scope: ClaimScope?) -> RelatedPair[]
   Inputs:
-    scope               — optional filter to team/project scope
+    entity_id           — optional entity to scope the query
     topic               — optional topic filter
+    scope               — optional team/project scope filter
   Returns:
-    Pairs of claims connected by "contradicts" edges that have not been resolved
-    (no "supersedes" edge exists for either)
+    Pairs of claims connected by `relates_to` edges, including the grounded_in
+    positions of each author so callers can evaluate the acknowledgement gap
 
 queryAuthorizations(scope: AuthorizationScope) -> AuthorizationRecord[]
   Inputs:
@@ -201,9 +203,9 @@ Retrieves the artifact content from Layer A. Runs LLM-based extraction pipeline:
 2. **Named entity recognition:** Identifies people, teams, projects, tasks, dates, and deliverables
 3. **Entity resolution:** Maps extracted entities to existing entities in the B graph (or creates new ones)
 4. **Relation extraction:** Identifies relationships between entities (depends_on, owns, committed_to, blocked_by)
-5. **Contradiction detection:** For each new claim, queries existing claims in the same scope/topic and checks for conflicts
+5. **Relationship detection:** For each new claim, queries existing claims in the same scope/topic and creates `relates_to` edges for related pairs
 
-For each extracted claim: creates a Layer B claim node with `grounded_in` links back to the Layer A artifact. For detected contradictions: creates `contradicts` edges between the conflicting claims — never auto-promotes to `supersedes`. If human-in-the-loop review is configured for this artifact type, flags ambiguous extractions for review.
+For each extracted claim: creates a Layer B claim node with `grounded_in` links back to the Layer A artifact. If human-in-the-loop review is configured for this artifact type, flags ambiguous extractions for review.
 
 ### 4.3 `queryWithManifest(query: ContextQuery) -> LayerCArtifact`
 
@@ -211,7 +213,7 @@ For each extracted claim: creates a Layer B claim node with `grounded_in` links 
 - `query` — topic, audience, purpose, constraints
 
 **What it does:**
-Executes retrieval over Layers A and B for content matching the query. Constructs a **retrieval manifest** recording: every source retrieved (artifact IDs, claim IDs, versions), every source that was eligible but not retrieved (and why — token limit, relevance cutoff), any truncation applied, and the time/token budget consumed. Applies governance rules to resolve conflicts: if contradicting claims exist without a supersession, both are preserved and labeled. Generates the output with epistemic labels attached to every assertion. Assigns a confidence score based on source coverage and conflict density. Returns the full Layer C artifact with manifest — no C artifact can exist without a retrieval manifest.
+Executes retrieval over Layers A and B for content matching the query. Constructs a **retrieval manifest** recording: every source retrieved (artifact IDs, claim IDs, versions), every source that was eligible but not retrieved (and why — token limit, relevance cutoff), any truncation applied, and the time/token budget consumed. Preserves all related claims; if `relates_to` pairs exist, both sides are included and labeled with their respective `grounded_in` positions. Generates the output with epistemic labels attached to every assertion. Assigns a confidence score based on source coverage and conflict density. Returns the full Layer C artifact with manifest — no C artifact can exist without a retrieval manifest.
 
 ### 4.4 `detectRelationships(new_claim: LayerBClaim) -> RelatedPair[]`
 
@@ -219,19 +221,9 @@ Executes retrieval over Layers A and B for content matching the query. Construct
 - `new_claim` — a newly extracted or inserted claim
 
 **What it does:**
-Queries the B graph for existing claims that share the same subject/topic/scope. Uses semantic similarity and logical consistency checks to identify related claims — including direct conflicts, narrower/broader scope, and informational connections. For each detected relationship: creates a `relates_to` edge between the new claim and the existing claim. **Critical invariant:** `relates_to` never auto-promotes to `supersedes`. Supersession requires explicit governance evidence from Layer A (a decision record, an ADR, an approved resolution). Returns the list of related pairs for upstream consumers (Policy Engine, Goal Engine, Meeting Engine). The Policy Engine then evaluates each pair to determine whether the acknowledgement gap and context warrant outreach.
+Queries the B graph for existing claims that share the same subject/topic/scope. Uses semantic similarity and logical consistency checks to identify related claims. For each detected relationship: creates a `relates_to` edge between the specific versions being compared. Called both on initial claim insertion and on new version creation — edges from prior versions are not transferred, they are re-evaluated fresh. Returns the list of related pairs for upstream consumers (Policy Engine, Goal Engine, Meeting Engine). The Policy Engine then evaluates each pair to determine whether the acknowledgement gap and context warrant outreach.
 
-### 4.5 `resolveSupersession(superseding: ClaimId, superseded: ClaimId, evidence: ArtifactId) -> void`
-
-**Inputs:**
-- `superseding` — the claim that replaces the old one
-- `superseded` — the claim being replaced
-- `evidence` — Layer A governance artifact that justifies the supersession (decision record, approval, etc.)
-
-**What it does:**
-Validates that the evidence artifact exists in Layer A and is of a governance type (decision, ADR, approval). Creates a `supersedes` edge from the superseding claim to the superseded claim. Marks the superseded claim's `valid_until` timestamp. Triggers invalidation of any Layer C artifacts that referenced the superseded claim. Logs the supersession with full provenance for audit.
-
-### 4.6 `invalidateCache(trigger: InvalidationTrigger) -> InvalidatedArtifactId[]`
+### 4.5 `invalidateCache(trigger: InvalidationTrigger) -> InvalidatedArtifactId[]`
 
 **Inputs:**
 - `trigger` — the event that triggered invalidation (Layer A artifact change, Layer B node re-version, new source in topic neighborhood)
@@ -273,9 +265,7 @@ LayerBClaim {
   predicate: string
   object: any
   grounded_in: GroundedInRef[]             // must be non-empty
-  epistemic_status: ASSERTED | COMMITTED | DECIDED | SPECULATED | RETRACTED
   valid_from: timestamp
-  valid_until: timestamp?
   scope: ClaimScope                        // team, project, or global
   confidence: float?
 }
@@ -286,12 +276,29 @@ LayerBClaim {
 ```
 GroundedInRef {
   artifact_id: ArtifactId
-  position: ASSERTS | AGREES | UNCERTAIN | DISAGREES
+  position: ASSERTS | AGREES | UNCERTAIN | DISAGREES | RETRACTS
 }
 ```
 
 `ASSERTS` — the artifact's author is making this claim directly.
-`AGREES` / `DISAGREES` / `UNCERTAIN` — the author is expressing a stance toward an existing claim. Multiple authors can each have a `grounded_in` ref on the same claim with different positions.
+`AGREES` / `DISAGREES` / `UNCERTAIN` — the author is expressing a stance toward an existing claim.
+`RETRACTS` — the author is withdrawing their prior ASSERTS or AGREES on this claim.
+Multiple authors can each have a `grounded_in` ref on the same claim with different positions. The current state of a claim is fully derivable from these positions — no separate `epistemic_status` field is needed.
+
+### Claim Versioning
+
+`claim_id` is stable across all versions of a claim. `version` is monotonically increasing. Each version has its own `grounded_in` refs — the evidence that produced or supports that version's content specifically.
+
+**What creates a new version vs. a new `grounded_in` ref:**
+
+- Content changes (object or predicate materially shifts) → new version
+- Stance changes (someone AGREES, DISAGREES, RETRACTS) → new `grounded_in` ref on the current version
+
+**Who can produce a new version:** anyone whose evidence materially changes the claim content. This is a judgment call by the extraction pipeline — there is no restriction to the original claimer. If a teammate's new statement produces a refined understanding of the same claim, and the original claimer's grounded_in position on the new version is AGREES, that is a valid version transition.
+
+**Current version:** max version number for a given `claim_id`. No explicit pointer needed.
+
+**`relates_to` edges and versioning:** edges connect specific versions, not `claim_id`s abstractly. When a new version is created, relationship detection re-runs and produces fresh edges for that version. Old edges on prior versions are preserved as history. Policy evaluates edges on the latest version.
 
 ### OutreachRequest
 
@@ -314,10 +321,9 @@ Policy Engine is the only writer. Escalation is not a status — it is a new `Ou
 
 **Claim-to-claim:**
 
-| Type | Evidence required | Behavioral consequence |
-|---|---|---|
-| `relates_to` | No | Flags the pair for Policy evaluation of acknowledgement gap; most edges result in no action |
-| `supersedes` | **Yes** — Layer A governance artifact | Sets `valid_until` on old claim; triggers Layer C invalidation |
+| Type | Notes |
+|---|---|
+| `relates_to` | Flags the pair for Policy evaluation; most edges result in no action |
 
 **Entity-to-entity:**
 
@@ -339,7 +345,7 @@ Policy Engine is the only writer. Escalation is not a status — it is a new `Ou
 | `regarding` | Entity \| Claim | Determines downstream behavior when status → RESPONDED |
 | `targets` | Entity (Identity) | Who the agent is waiting on |
 
-**Dropped:** `supports`, `contradicts`, `clarifies`, `narrows`, `approved_by`, `rejected_by` — collapsed into `relates_to` and `grounded_in` positions. Temporal evolution (same-author claim updates) is handled by timestamps and `grounded_in` artifacts; no named edge required.
+**Dropped:** `supports`, `contradicts`, `clarifies`, `narrows`, `supersedes`, `approved_by`, `rejected_by` — collapsed into `relates_to` and `grounded_in` positions. `valid_until` on claims is also dropped from the logical model; temporal evolution is handled by timestamps and `grounded_in` artifacts. Explicit retraction uses `epistemic_status: RETRACTED`.
 
 ### Layer C Artifact
 
@@ -386,12 +392,10 @@ RetrievalManifest {
 | `writeArtifact()` | Write same artifact twice (same external ref) | Second write creates version 2; version 1 unchanged; both retrievable |
 | `writeArtifact()` | Write `MEETING_STATE` artifact | Artifact stored with correct `artifact_type`; queryable via `queryArtifacts(artifact_type: MEETING_STATE)` |
 | `writeArtifact()` | Attempt overwrite of existing artifact | Rejected; new version created instead |
-| `writeClaim()` | New claim conflicts with existing claim in same scope | `contradicts` edge automatically created between the two claims |
-| `writeClaim()` | New claim is consistent with existing claims | No `contradicts` edge; claim stored normally |
+| `writeClaim()` | New claim related to existing claim in same scope | `relates_to` edge automatically created between the two claims |
+| `writeClaim()` | New claim unrelated to existing claims | No `relates_to` edge; claim stored normally |
 | `writeClaim()` | Claim without `grounded_in` populated | Rejected — constraint enforced |
-| `resolveSupersession()` | Call with valid governance artifact as evidence | `supersedes` edge created; superseded claim gets `valid_until` |
-| `resolveSupersession()` | Call with no evidence | Rejected — `supersedes` without governance evidence is not allowed |
-| `detectContradiction()` | Two claims with opposing predicates for same subject | Both claims connected with `contradicts` edge; neither auto-promoted |
+| `detectRelationships()` | Two claims with opposing predicates for same subject | Both claims connected with `relates_to` edge |
 | `generateContextPack()` | Query with topic match in Layer B | Returns `LayerCArtifact` with populated `retrieval_manifest` |
 | `generateContextPack()` | Query where sources exceed token budget | Truncation flag set in manifest; eligible-but-not-retrieved sources listed |
 | `invalidateCache()` | Layer A artifact updated | All Layer C artifacts whose `retrieval_manifest` references it are marked `invalidated_by` |
@@ -403,7 +407,6 @@ RetrievalManifest {
 |---|---|
 | No `LayerCArtifact` exists without a `retrieval_manifest` | Schema validation test: attempt to create C artifact without manifest; verify rejection |
 | No `LayerBClaim` exists without at least one `grounded_in` link to Layer A | Constraint enforcement: attempt to write claim with empty `grounded_in`; verify rejection |
-| `supersedes` edges always have a non-null evidence reference | Attempt to create `supersedes` relationship with null evidence; verify rejection |
 | Every Layer A write is append-only | Attempt direct field mutation on existing artifact; verify rejected; verify version created |
 
 ### Integration Tests
@@ -411,8 +414,8 @@ RetrievalManifest {
 | Test | Approach |
 |---|---|
 | Extraction pipeline: meeting transcript → Layer B claims | Feed gold-standard transcript; verify expected commitments, entities, and relations appear in Layer B |
-| Contradiction detection across extraction runs | Feed two transcripts with conflicting requirement statements; verify `contradicts` edge in Layer B |
-| Query engine resolves conflict with governance evidence | Insert contradicting claims + decision record in Layer A; query topic; verify superseded claim excluded from result |
+| Relationship detection across extraction runs | Feed two transcripts with conflicting requirement statements; verify `relates_to` edge in Layer B |
+| Query engine includes all related claims with positions | Insert related claims; query topic; verify both sides returned with their `grounded_in` positions |
 | C promotion to A preserves full lineage | Promote a Layer C artifact; verify new Layer A artifact's provenance chain traces back to all original sources |
 | MEETING_STATE artifact queryable by meeting ID | Meeting Engine writes state; Policy Engine queries `artifact_type: MEETING_STATE, meeting_id: X`; verify correct state returned |
 
@@ -421,5 +424,5 @@ RetrievalManifest {
 | Test | Acceptance Criterion |
 |---|---|
 | Layer B query at 6-month synthetic data volume | `queryClaimsForTopic()` returns within 500ms at p95 |
-| Contradiction detection on bulk claim import | 1,000 claims imported; all contradictions detected; no missed conflicts |
+| Relationship detection on bulk claim import | 1,000 claims imported; all `relates_to` edges detected; no missed relationships |
 | Concurrent Layer A writes from multiple modules | No data loss; all artifacts correctly versioned under concurrent write load |
