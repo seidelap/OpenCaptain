@@ -122,9 +122,14 @@ Escalation is not a status on `OutreachRequest` — it is a new `OutreachRequest
 
 **Dropped:** `supports`, `contradicts`, `clarifies`, `narrows`, `supersedes`, `revises`, `approved_by`, `rejected_by` — collapsed into `relates_to` + `grounded_in` positions.
 
-### Temporal evolution
+### Claim versioning
 
-No named edge, no `valid_until` field. Active view = most recent ASSERTS from an author by timestamp. Full history is in the `grounded_in` artifacts. Explicit retraction uses `epistemic_status: RETRACTED` on the claim. `valid_until` can be added as a materialized cache field if query performance demands it, but is not part of the logical model.
+`claim_id` is stable across versions; `version` is monotonically increasing. `grounded_in` refs live on a specific version — they are evidence for that version's content.
+
+- **New version:** content (object or predicate) materially changes. Anyone's evidence can produce a new version — no restriction to the original claimer. Extraction pipeline makes the judgment call.
+- **New `grounded_in` ref:** stance changes (AGREES, DISAGREES, RETRACTS) on existing content. No new version.
+- **Current version:** max version for a given `claim_id`.
+- **`relates_to` edges:** connect specific versions. Re-evaluated fresh on new version creation; prior-version edges preserved as history. Policy evaluates latest-version edges only.
 
 ### Outreach trigger condition
 

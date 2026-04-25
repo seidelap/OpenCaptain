@@ -2,7 +2,7 @@
 
 ## 1. Purpose
 
-The agent's memory system, implementing the three-layer A/B/C model. **Layer A** is the immutable evidence/provenance layer (raw artifacts, governance records). **Layer B** is the semantic claims graph (entities, relationships, contradictions, supersessions). **Layer C** is the cached derived-views layer (meeting prep, context packs, query results). The Knowledge Store is the single source of truth for everything the agent knows, believes, and has been told — and it maintains full provenance and versioning so that any conclusion can be traced back to its sources.
+The agent's memory system, implementing the three-layer A/B/C model. **Layer A** is the immutable evidence/provenance layer (raw artifacts, governance records). **Layer B** is the semantic claims graph (versioned claims, entities, relationships, and grounded_in positions). **Layer C** is the cached derived-views layer (meeting prep, context packs, query results). The Knowledge Store is the single source of truth for everything the agent knows, believes, and has been told — and it maintains full provenance and versioning so that any conclusion can be traced back to its sources.
 
 ---
 
@@ -74,8 +74,10 @@ writeClaim(claim: LayerBClaim) -> ClaimId
   Returns:
     ClaimId (stable URI)
 
-  Behavior: On insertion, automatically runs relationship detection against existing claims in
-  the same scope/topic. If related claims found, creates `relates_to` edges.
+  Behavior: If a claim with this claim_id already exists, a new version is created when the
+  content (object or predicate) has materially changed — otherwise a new grounded_in ref is
+  added to the current version. On insertion of a new version, automatically re-runs
+  relationship detection and creates fresh `relates_to` edges for the new version.
 
 queryClaimsForTopic(topic: string, scope: ClaimScope?, as_of: timestamp?) -> ClaimSet
   Inputs:
@@ -219,7 +221,7 @@ Executes retrieval over Layers A and B for content matching the query. Construct
 - `new_claim` — a newly extracted or inserted claim
 
 **What it does:**
-Queries the B graph for existing claims that share the same subject/topic/scope. Uses semantic similarity and logical consistency checks to identify related claims. For each detected relationship: creates a `relates_to` edge between the new claim and the existing claim. Returns the list of related pairs for upstream consumers (Policy Engine, Goal Engine, Meeting Engine). The Policy Engine then evaluates each pair to determine whether the acknowledgement gap and context warrant outreach.
+Queries the B graph for existing claims that share the same subject/topic/scope. Uses semantic similarity and logical consistency checks to identify related claims. For each detected relationship: creates a `relates_to` edge between the specific versions being compared. Called both on initial claim insertion and on new version creation — edges from prior versions are not transferred, they are re-evaluated fresh. Returns the list of related pairs for upstream consumers (Policy Engine, Goal Engine, Meeting Engine). The Policy Engine then evaluates each pair to determine whether the acknowledgement gap and context warrant outreach.
 
 ### 4.5 `invalidateCache(trigger: InvalidationTrigger) -> InvalidatedArtifactId[]`
 
@@ -282,6 +284,21 @@ GroundedInRef {
 `AGREES` / `DISAGREES` / `UNCERTAIN` — the author is expressing a stance toward an existing claim.
 `RETRACTS` — the author is withdrawing their prior ASSERTS or AGREES on this claim.
 Multiple authors can each have a `grounded_in` ref on the same claim with different positions. The current state of a claim is fully derivable from these positions — no separate `epistemic_status` field is needed.
+
+### Claim Versioning
+
+`claim_id` is stable across all versions of a claim. `version` is monotonically increasing. Each version has its own `grounded_in` refs — the evidence that produced or supports that version's content specifically.
+
+**What creates a new version vs. a new `grounded_in` ref:**
+
+- Content changes (object or predicate materially shifts) → new version
+- Stance changes (someone AGREES, DISAGREES, RETRACTS) → new `grounded_in` ref on the current version
+
+**Who can produce a new version:** anyone whose evidence materially changes the claim content. This is a judgment call by the extraction pipeline — there is no restriction to the original claimer. If a teammate's new statement produces a refined understanding of the same claim, and the original claimer's grounded_in position on the new version is AGREES, that is a valid version transition.
+
+**Current version:** max version number for a given `claim_id`. No explicit pointer needed.
+
+**`relates_to` edges and versioning:** edges connect specific versions, not `claim_id`s abstractly. When a new version is created, relationship detection re-runs and produces fresh edges for that version. Old edges on prior versions are preserved as history. Policy evaluates edges on the latest version.
 
 ### OutreachRequest
 
