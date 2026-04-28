@@ -41,6 +41,8 @@ This keeps “what do the rules say?” separate from “what is the status of *
 
 ## 5. Anti-duplicate messaging and Module 6 (Team Goal Engine)
 
+> **Status:** The function names below (`decideAction`, `detectBlockers`, `syncWorkItems`, `Blocker.resolved`) are obsolete after the Module 6 rewrite — Module 6 is now organized as three stages (Tree Maintenance / Candidate Scoring / Action Proposal) over a unified `Goal` Entity. The dedup resolution described in this section (Policy evaluates graph state via `OutreachRequest` query) is unchanged and remains the canonical answer.
+
 - Module 6’s **`decideAction` → `submitAction`** flow does **not** yet fully specify how to **avoid repeating** the same nudge (blocker surface, reminder, “two requirements” post, access request) on every `detectBlockers()` run.
 - **Existing hooks:** `Blocker.resolved`, **B graph** changes (`supersedes`, ticket updates), `syncWorkItems` “previous state” — help when the *world* changes; they do not alone solve “same open issue, many evaluation cycles.”
 - **Resolution (decided):** dedup is handled by the **Policy Engine evaluating graph state**, not by a timestamp field or static policy YAML. Before re-sending, `assembleContext()` queries the Knowledge Store for any `OutreachRequest` node linked to the same fingerprint and includes its full context (attempt count, status, recipient activity signals, blocker severity). Policy rules evaluate that context and DENY if re-sending isn’t appropriate. This allows arbitrarily complex re-outreach logic — not just “has the cooldown expired?” but e.g. “severity dropped,” “higher-priority item already open for this person,” “recipient showed partial signal.”
@@ -79,14 +81,22 @@ This keeps “what do the rules say?” separate from “what is the status of *
 | OUTREACH_SENT | Immutable record of a message the agent sent |
 | AUTHORIZATION_GRANTED, AUTHORIZATION_DENIED | Approval outcomes (replaces standalone `AuthorizationRecord`) |
 | ACL_SNAPSHOT, CALENDAR_EVENT | Identity and scheduling records |
+| DETECTION_RECORD | Goal Engine scoring snapshot — grounds engine-derived Claims (progress, coverage, alignment, relevance) so decisions are replayable |
 
 W3C PROV edges only (`wasAttributedTo`, `wasGeneratedBy`, `wasDerivedFrom`). Never point into Layer B.
 
-**Layer B — three node types:**
+**Layer B — Entity types:**
+
+| Entity | What it holds |
+|---|---|
+| `Identity` | A person or service principal — subject/object of claims |
+| `Team` | A coordination scope |
+| `Goal` | The unified node type for the goal hierarchy: initiatives, epics, tickets, subtasks, "get access" tasks, "clarify this disagreement" tasks. Variation expressed via Claim predicates (`nature`, `origin`, `tracked_in`, `assigned_to`, `status`), not via subtypes. There is no separate `WorkItem` or `Blocker` Entity — those are Goals with specific Claim profiles. |
+
+**Layer B — non-Entity nodes:**
 
 | Node | What it holds |
 |---|---|
-| `Entity` | Identity, WorkItem, Blocker, Team — subjects and objects of claims |
 | `Claim` | Subject-predicate-object world-state assertion |
 | `OutreachRequest` | Agent communication state: `status` (OPEN \| RESPONDED \| CANCELLED), `attempt_count`, `last_sent_at` |
 
@@ -104,8 +114,9 @@ Escalation is not a status on `OutreachRequest` — it is a new `OutreachRequest
 
 | Edge | Notes |
 |---|---|
-| `depends_on` | Dependency relationship |
-| `same_as` | Deduplication link |
+| `decomposes_into` | Goal → Goal. Parent-child structural decomposition; the Goal Engine walks these for progress propagation and resolution cascade. |
+| `depends_on` | Goal → Goal. Sequencing/precedence; orthogonal to decomposition. Resolution does not cascade across these. |
+| `same_as` | Deduplication link; used by Goal Engine `mergeGoals()` when authored and extracted Goals refer to the same outcome. |
 
 **OutreachRequest edges:**
 
@@ -149,9 +160,11 @@ Once both authors have `grounded_in` edges to each other’s claims, the conflic
 2. ~~Reconcile with scheduled reminder events.~~ **Done:** Policy evaluates graph state. Optional `scheduleWakeEvent()` on Module 1 for precise timing only.
 3. ~~Flesh out graph schema.~~ **Done:** see §7.
 4. ~~Specify how `AuthorizationRecord` and `OutreachRequest` relate.~~ **Done:** `AuthorizationRecord` is now an AUTHORIZATION_GRANTED artifact in Layer A; `OutreachRequest` is the pending state in Layer B.
-5. **Next:** propagate graph schema to module specs — Module 4 (relationship types, data models), Module 3 (approval flow, AuthorizationRecord), Module 6 (dedup via OutreachRequest).
-6. Define **fingerprinting** for “same issue” — what stable identifier links multiple `OutreachRequest` nodes about the same blocker or approval?
-7. Work out what the `relates_to` detection algorithm looks like — what signals cause the extraction pipeline to create a `relates_to` edge, and what is the expected false-positive rate?
+5. ~~Propagate graph schema to module specs.~~ **Done:** Module 4 (Entity types, edge types, DETECTION_RECORD, subscribeInvalidations), Module 3 (AuthorizationRecord as artifact), Module 6 (rewritten as a three-stage decision engine over the unified Goal entity).
+6. ~~Goal Engine redesign.~~ **Done:** Module 6 collapsed to one Entity type (`Goal`); recursive `decomposes_into`; engine-derived Claims (`progress_assessment`, `coverage_assessment`, `alignment_assessment`, `goal_relevance`) grounded in DETECTION_RECORD artifacts; reactive recomputation via `subscribeInvalidations()`; two-stage scoring (heuristic + LLM tier-up); active-view invariant via cascade resolution.
+7. **Next:** define **candidate fingerprinting** algorithm — the stable hash of (kind, affected_goal_ids, evidence_ids) that identifies "same issue" across enumeration cycles. Currently sketched in Module 6 §9 but not formally specified.
+8. **Next:** work out what the `relates_to` detection algorithm looks like — what signals cause the extraction pipeline to create a `relates_to` edge, and what is the expected false-positive rate? Goal Engine scoring is robust to false positives (low-relevance candidates produce silence), but extraction quality still affects audit cost.
+9. **Next:** define the heuristic feature weights and the LLM tier-up confidence threshold defaults. Module 6 leaves these to config; we need first-pass values to ship.
 
 ---
 

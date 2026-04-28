@@ -24,7 +24,7 @@ Allow administrators to author policies, manage whitelists, tune thresholds, and
 | **Policy & Governance Engine (Module 3)** | `getPolicyRules()`, `getThresholds()`, `getWhitelists()`, `getAdminDLs()`, `onConfigChanged()` | Policy engine reads all policy rules, thresholds, whitelists, and admin DL definitions |
 | **Knowledge Store (Module 4)** | `getKnowledgeConfig()`, `onConfigChanged()` | Knowledge Store reads extraction pipeline parameters, Layer C TTLs, invalidation sensitivity, retention policies |
 | **Meeting Participation Engine (Module 5)** | `getMeetingConfig()`, `onConfigChanged()` | Meeting engine reads small meeting threshold, relevance thresholds, devil's advocate toggle, rate limits |
-| **Team Goal Engine (Module 6)** | `getGoalEngineConfig()`, `onConfigChanged()` | Goal engine reads team scope, blocker sensitivity, sync suggestion thresholds |
+| **Team Goal Engine (Module 6)** | `getGoalEngineConfig()`, `onConfigChanged()` | Goal engine reads team scope, relevance threshold, heuristic weights, LLM tier-up settings, recipient-load ceiling, and audit silence-log delta |
 | **Audit & Observability Layer (Module 7)** | `getAuditConfig()`, `onConfigChanged()` | Audit layer reads retention policies, alert thresholds, dashboard configuration |
 
 ---
@@ -139,13 +139,26 @@ getMeetingConfig() -> MeetingConfig
 getGoalEngineConfig() -> GoalEngineConfig
   Returns:
     GoalEngineConfig {
-      team_dl: UnifiedGroupRef,
-      blocker_detection_sensitivity: LOW | MEDIUM | HIGH,
-      sync_suggestion_threshold: float,
-      work_item_refresh_interval_seconds: number,
-      external_dependency_alert_enabled: bool
+      team_dl: UnifiedGroupRef,                    // which team this engine instance serves
+      relevance_threshold: float,                  // goal_relevance score above which Stage 3 proposes
+      heuristic_weights: Map<string, float>,       // per-feature weights for Stage 2 heuristic scoring
+                                                   //   keys: execution_proximity, ancestor_priority,
+                                                   //         evidence_age, acknowledgement_gap,
+                                                   //         recipient_load, recent_resolution_signal
+      llm_tier_up_enabled: bool,                   // master switch for LLM-tier scoring
+      llm_tier_up_threshold: float,                // heuristic confidence below which LLM is invoked
+      llm_model: string,                           // model identifier (default: claude-haiku-4-5)
+      llm_daily_cost_cap_usd: float,               // safety ceiling on LLM spend per day
+      max_open_outreach_per_recipient: number,     // recipient_load feature ceiling; suppresses new
+                                                   //   proposals targeting overloaded identities
+      cascade_resolution_enabled: bool,            // controls active-view invariant enforcement;
+                                                   //   defaults true; off only for migration/debug
+      silence_log_score_delta: float               // re-log silent decisions only when score changes
+                                                   //   by at least this much; rate limits audit noise
     }
 ```
+
+The Goal Engine config is broader than prior versions: it controls scoring behavior, LLM cost, and audit verbosity rather than feature toggles tied to a fixed set of detection routines. Per-engine-instance scoping (one per team) is preserved via `team_dl`.
 
 #### Audit Configuration
 

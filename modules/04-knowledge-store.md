@@ -40,9 +40,15 @@ writeArtifact(artifact: LayerAArtifact) -> ArtifactId
                           timestamp, artifact_type
                           artifact_type includes: TRANSCRIPT | MESSAGE | TICKET | APPROVAL |
                           DECISION | ACL_SNAPSHOT | CALENDAR_EVENT | MEETING_STATE |
-                          OUTREACH_SENT | AUTHORIZATION_GRANTED | AUTHORIZATION_DENIED
+                          OUTREACH_SENT | AUTHORIZATION_GRANTED | AUTHORIZATION_DENIED |
+                          DETECTION_RECORD
                           MEETING_STATE artifacts are written by the Meeting Engine on every
                           state transition and queried by the Policy Engine's Context Assembler.
+                          DETECTION_RECORD artifacts are written by the Goal Engine to ground
+                          its derived Claims (progress, coverage, alignment, relevance
+                          assessments). Each carries the candidate fingerprint, scoring
+                          features and weights, LLM rationale (if any), and the engine config
+                          version, so engine decisions are replayable.
   Returns:
     ArtifactId (stable, immutable reference)
 
@@ -112,7 +118,7 @@ queryAuthorizations(scope: AuthorizationScope) -> AuthorizationRecord[]
 
 queryOutreachRequests(regarding: EntityId, status: OutreachStatus?) -> OutreachRequest[]
   Inputs:
-    regarding           — entity (Blocker, WorkItem, Claim, PendingAction) this outreach concerns
+    regarding           — entity (Goal, Claim, PendingAction) this outreach concerns
     status              — optional filter: OPEN | RESPONDED | CANCELLED
   Returns:
     OutreachRequest nodes linked to this entity, ordered by last_sent_at desc
@@ -120,6 +126,19 @@ queryOutreachRequests(regarding: EntityId, status: OutreachStatus?) -> OutreachR
 writeOutreachRequest(request: OutreachRequest) -> OutreachRequestId
 updateOutreachRequest(id: OutreachRequestId, patch: OutreachRequestPatch) -> void
   — Create and update OutreachRequest nodes. Policy Engine is the only caller.
+
+subscribeInvalidations(filter: InvalidationFilter, callback: (event: InvalidationEvent) -> void) -> SubscriptionHandle
+  Inputs:
+    filter              — { entity_ids?, claim_ids?, scope?, predicates? } — limits the
+                          callback to changes affecting the subscriber's interests
+  Returns:
+    SubscriptionHandle
+
+  Behavior: Emits an InvalidationEvent whenever a Claim or Entity matching the filter is
+  versioned, retracted, or has its grounded_in refs change. Used by the Goal Engine to
+  reactively re-score candidates. Layer C invalidation (existing behavior) is a special
+  case of this same signal pipeline — both subscribers receive the same event stream
+  filtered to their concern.
 ```
 
 #### Layer C — Thoughts Cache Operations
@@ -242,7 +261,8 @@ LayerAArtifact {
   artifact_id: ArtifactId (stable UUID)
   version: number (monotonically increasing)
   artifact_type: TRANSCRIPT | MESSAGE | TICKET | APPROVAL | DECISION | ACL_SNAPSHOT | CALENDAR_EVENT |
-               MEETING_STATE | OUTREACH_SENT | AUTHORIZATION_GRANTED | AUTHORIZATION_DENIED
+               MEETING_STATE | OUTREACH_SENT | AUTHORIZATION_GRANTED | AUTHORIZATION_DENIED |
+               DETECTION_RECORD
   source_platform: Platform
   author_id: UnifiedIdentity
   content: any
@@ -317,6 +337,17 @@ OutreachRequest {
 
 Policy Engine is the only writer. Escalation is not a status — it is a new `OutreachRequest` with a different `targets` identity, linked by sharing the same `regarding` target.
 
+### Layer B Entity Types
+
+| Entity | Function |
+|---|---|
+| `Identity` | A person or service principal — who acts |
+| `Team` | A coordination scope |
+| `Goal` | The unified node type for the goal hierarchy: initiatives, epics, tickets, subtasks, "get access" tasks, "clarify this disagreement" tasks. Variation across these is expressed via Claim predicates (`nature`, `origin`, `tracked_in`, `assigned_to`, `status`, etc.), not via Entity subtypes. The Goal Engine recurses on `decomposes_into` edges from team-rooted Goals down to leaves. |
+| `OutreachRequest` | Open agent communication loop (see above) |
+
+There is intentionally no separate `WorkItem` or `Blocker` Entity type. A "WorkItem" is a Goal with `tracked_in` pointing to a TICKET artifact and an `assigned_to` Claim. A "Blocker" is a Goal with `nature: unblock | clarify | request_access` and `origin: detected`, related to other Goals via `depends_on` (or as the inverse of another Goal's `depends_on` edge).
+
 ### Layer B Relationship Types
 
 **Claim-to-claim:**
@@ -329,8 +360,9 @@ Policy Engine is the only writer. Escalation is not a status — it is a new `Ou
 
 | Type | Notes |
 |---|---|
-| `depends_on` | Dependency relationship |
-| `same_as` | Deduplication / entity merge link |
+| `decomposes_into` | Goal → Goal. Parent-child structural decomposition. The progress aggregator walks these upward; `cascadeResolution()` walks them downward. Free-form `completion_logic` Claims on the parent describe non-default combination rules (e.g., "A OR (B AND C)"); default behavior is conservative ALL_OF. |
+| `depends_on` | Goal → Goal. Sequencing/precedence; orthogonal to decomposition. Resolution does **not** cascade across these — a dependency being resolved unblocks dependents, but does not resolve them. |
+| `same_as` | Deduplication / entity merge link. Used by `mergeGoals()` when authored and extracted Goals turn out to refer to the same outcome. |
 
 **Crosses layers (B → A), used on both `Claim` and `OutreachRequest` nodes:**
 
@@ -345,7 +377,20 @@ Policy Engine is the only writer. Escalation is not a status — it is a new `Ou
 | `regarding` | Entity \| Claim | Determines downstream behavior when status → RESPONDED |
 | `targets` | Entity (Identity) | Who the agent is waiting on |
 
-**Dropped:** `supports`, `contradicts`, `clarifies`, `narrows`, `supersedes`, `approved_by`, `rejected_by` — collapsed into `relates_to` and `grounded_in` positions. `valid_until` on claims is also dropped from the logical model; temporal evolution is handled by timestamps and `grounded_in` artifacts. Explicit retraction uses `epistemic_status: RETRACTED`.
+**Dropped:** `supports`, `contradicts`, `clarifies`, `narrows`, `supersedes`, `approved_by`, `rejected_by` — collapsed into `relates_to` and `grounded_in` positions. `valid_until` on claims is also dropped from the logical model; temporal evolution is handled by timestamps and `grounded_in` artifacts. Explicit retraction is the `RETRACTS` `grounded_in` position — there is no separate `epistemic_status` field.
+
+### Engine-Derived Claim Predicates
+
+The Goal Engine writes Claims on Goal Entities to record its derived assessments. The Knowledge Store accepts these like any other Claim — the predicate vocabulary is open — but they are listed here for cross-module reference:
+
+| Predicate | Range | Writer |
+|---|---|---|
+| `progress_assessment` | on_track \| at_risk \| behind \| done \| unknown | Goal Engine `propagateProgress()` |
+| `coverage_assessment` | covered \| partial \| uncovered | Goal Engine candidate enumeration |
+| `alignment_assessment` | aligned \| divergent \| unknown | Goal Engine candidate enumeration |
+| `goal_relevance` | float in [0, 1] | Goal Engine `recordScore()`, re-versioned on invalidation |
+
+Every engine-written Claim has `grounded_in` → a `DETECTION_RECORD` artifact in Layer A. The Knowledge Store enforces this the same way it enforces `grounded_in` non-emptiness for any Claim: at write time, via constraint check.
 
 ### Layer C Artifact
 
@@ -391,6 +436,9 @@ RetrievalManifest {
 |---|---|---|
 | `writeArtifact()` | Write same artifact twice (same external ref) | Second write creates version 2; version 1 unchanged; both retrievable |
 | `writeArtifact()` | Write `MEETING_STATE` artifact | Artifact stored with correct `artifact_type`; queryable via `queryArtifacts(artifact_type: MEETING_STATE)` |
+| `writeArtifact()` | Write `DETECTION_RECORD` artifact | Artifact stored with correct `artifact_type`; carries fingerprint, features, weights, and engine config version; queryable by Goal Engine for replay |
+| `subscribeInvalidations()` | Claim version updated; subscriber filter matches | Callback fires once with InvalidationEvent referencing the changed claim_id and new version |
+| `subscribeInvalidations()` | Claim updated; subscriber filter does not match | Callback does not fire |
 | `writeArtifact()` | Attempt overwrite of existing artifact | Rejected; new version created instead |
 | `writeClaim()` | New claim related to existing claim in same scope | `relates_to` edge automatically created between the two claims |
 | `writeClaim()` | New claim unrelated to existing claims | No `relates_to` edge; claim stored normally |

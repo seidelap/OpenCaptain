@@ -426,10 +426,13 @@ The agent's memory system, implementing the three-layer A/B/C model: provenance 
 │  │  Layer B: Semantic Claim Graph                    │  │
 │  │  ─────────────────────────────────────────────    │  │
 │  │  Storage: Temporal knowledge graph                │  │
-│  │  Contents: entities, claims, relationships        │  │
-│  │  Edge types: supports, contradicts, supersedes,   │  │
-│  │    approved_by, depends_on, expires_at,           │  │
-│  │    applies_to_scope                               │  │
+│  │  Entity types: Identity, Team, Goal,              │  │
+│  │    OutreachRequest                                │  │
+│  │  Edge types: relates_to (claim↔claim),            │  │
+│  │    decomposes_into, depends_on, same_as           │  │
+│  │    (entity↔entity), grounded_in (B→A with         │  │
+│  │    position: ASSERTS/AGREES/UNCERTAIN/            │  │
+│  │    DISAGREES/RETRACTS)                            │  │
 │  │  Properties: versioned, stable IDs, every claim   │  │
 │  │    grounded to A via provenance links              │  │
 │  └──────────────────────┬───────────────────────────┘  │
@@ -468,10 +471,11 @@ The agent's memory system, implementing the three-layer A/B/C model: provenance 
 **Layer B implementation details:**
 - Temporal knowledge graph (consider Graphiti/Zep-style or custom)
 - Claims have stable URIs and version histories
-- Relationship types: `supports`, `contradicts`, `supersedes`, `clarifies`, `narrows`, `depends_on`, `same_as`, `approved_by`, `rejected_by`
-- Every B node has `grounded_in: [a_artifact_ids]`
-- Contradiction detection: when a new claim enters B, check for conflicting claims in the same scope/topic
-- Supersession rules: `contradicts` never auto-promotes to `supersedes`; requires explicit governance evidence from A
+- Entity types: `Identity`, `Team`, `Goal`, `OutreachRequest` — `Goal` is the unified type for the goal hierarchy (initiatives, epics, tickets, subtasks, "get access," "clarify this"); variation expressed as Claims, not subtypes
+- Edge types: `relates_to` (claim↔claim, flags pairs for Policy evaluation); `decomposes_into`, `depends_on`, `same_as` (entity↔entity); `grounded_in` (B→A, carries position: ASSERTS/AGREES/UNCERTAIN/DISAGREES/RETRACTS)
+- Every B node has `grounded_in` to at least one A artifact
+- Conflict detection: extraction pipeline writes `relates_to` edges between claims that share a subject/topic and have content tension. Policy evaluates the edge in context (mutual-acknowledgement gap, etc.) — most edges produce no action
+- No auto-supersession: explicit supersession is captured by a new claim version with `grounded_in` referencing a `DECISION` artifact in A; the prior version remains in history
 
 **Layer C implementation details:**
 - Each C artifact includes: `c_id`, `created_at`, `query/task`, `a_snapshot_id`, `b_snapshot_id`, `retrieval_manifest`, `reasoning_policy`, `conflicts_detected`, `missing_sources`, `output`, `confidence`, `invalidated_by`
@@ -605,7 +609,7 @@ At any state: if policy changes (participant joins/leaves), re-evaluate constrai
 ### 4.6 Team Goal Engine
 
 #### Purpose
-The "scrum lead" decision brain for its own team. Tracks the team's owned work, progress toward goals, and shared understanding of what each task requires. When blockers, risks, or requirement disagreements are detected, the engine decides which actions to take to help the team make progress — then proposes those actions to the Policy Engine, which evaluates, approves, and delivers them via connectors. The Goal Engine itself has no communication channel to the outside world; it reads from the Knowledge Store and proposes actions. Requesting access to a currently disallowed action is itself an allowed action and is proposed the same way. The Policy Engine governs all interaction — including within the team. Un-siloing within the team is a natural effect of keeping everyone aligned toward shared goals, not a goal in itself.
+A **decision engine** for its assigned team. Reasons over a recursive tree of `Goal` entities — initiatives, epics, tickets, subtasks, "get access" requests, "clarify this disagreement" tasks — and continuously asks: *which action would most advance this team's goals right now?* Detection of conflicts, coverage gaps, and stale dependencies is cheap and exhaustive; acting on them is selective, gated by an explicit `goal_relevance` score. Most candidates produce silence; silence is itself logged as a deliberate decision. Every action the engine concludes is worth taking is submitted to the Policy Engine via `submitAction()`.
 
 #### Architecture
 
@@ -613,63 +617,48 @@ The "scrum lead" decision brain for its own team. Tracks the team's owned work, 
 ┌──────────────────────────────────────────────────┐
 │              Team Goal Engine                     │
 │                                                   │
-│  ┌─────────────────────────────────────────────┐  │
-│  │  Goal & Work Item Tracker                   │  │
-│  │  Owned tasks, epics, tickets from            │  │
-│  │  Jira/Asana/etc. scoped to this team         │  │
-│  │  Dependency graph within team's work         │  │
-│  └─────────────────┬───────────────────────────┘  │
+│  Stage 1: Tree Maintenance                        │
+│   - Ingest events (tickets, messages, decisions)  │
+│   - Maintain goal tree structure                  │
+│   - Cascade resolution down; propagate progress up│
 │                    │                               │
-│  ┌─────────────────┴───────────────────────────┐  │
-│  │  Requirement Alignment Tracker              │  │
-│  │  Extracts what each team member understands  │  │
-│  │  a task to require (from meetings, messages, │  │
-│  │  tickets). Flags divergent understandings as │  │
-│  │  B-layer claims needing reconciliation.      │  │
-│  └─────────────────┬───────────────────────────┘  │
+│  Stage 2: Candidate Scoring                       │
+│   - Enumerate candidates from the tree            │
+│   - Heuristic score (weighted features)           │
+│   - LLM tier-up on semantic close-calls           │
+│   - Write goal_relevance Claim + DETECTION_RECORD │
 │                    │                               │
-│  ┌─────────────────┴───────────────────────────┐  │
-│  │  Blocker & Disagreement Detector            │  │
-│  │  Monitors B graph for:                       │  │
-│  │  - Conflicting understandings of requirements│  │
-│  │  - Dependencies at risk within team's work   │  │
-│  │  - Stale action items or unresolved questions│  │
-│  │  - Commitments that may be in tension        │  │
-│  └─────────────────┬───────────────────────────┘  │
-│                    │                               │
-│  ┌─────────────────┴───────────────────────────┐  │
-│  │  Action Decision Engine                     │  │
-│  │  Determines what action to take next:        │  │
-│  │  → Propose action to Policy Engine           │  │
-│  │    (e.g. surface blocker, suggest sync,      │  │
-│  │     request access to a disallowed action)   │  │
-│  │  → Write C artifact or update B graph state  │  │
-│  │    (Knowledge Store writes — no connector)   │  │
-│  └─────────────────────────────────────────────┘  │
+│  Stage 3: Action Proposal                         │
+│   - Filter above relevance_threshold              │
+│   - submitAction() to Policy Engine               │
+│   - Log silent decisions for audit                │
 └──────────────────────────────────────────────────┘
 ```
 
 **Key behaviors:**
-- Primary mandate is task completion: help the team do the work it owns
-- The engine only makes decisions — it never communicates directly; all proposed actions go through the Policy Engine and are delivered via connectors
-- When a needed action is not currently allowed, the engine proposes a "request access" action — itself an allowed action routed through the Policy Engine
-- Surfaces disagreements about requirements and blockers by proposing actions; never adjudicates disagreements unilaterally
-- Applies epistemic labels to all proposed content: "Two different requirements have been stated for this task...", "This dependency may be at risk..."
-- Team members remain in control; the engine raises issues, the team resolves them
-- Un-siloing within the team is an emergent effect of goal alignment, not a primary design objective
+- One Entity type for the goal hierarchy: `Goal`. WorkItems and Blockers are not separate types; they are Goals with specific Claim predicates (`tracked_in`, `assigned_to`, `nature`, `origin`).
+- The recursion bottoms out wherever decomposition stops — naturally at the leaves committed to execution. Same engine logic walks OKR-level Goals and ticket-level Goals.
+- Reactive, not periodic: runs on inbound platform events (Stage 1) and on Knowledge Store invalidation events (Stages 2/3). No polling cycle.
+- Detection is exhaustive; action is selective. Every conflict, coverage gap, and stale dependency is enumerated as a candidate and scored. Most score below threshold and produce silence.
+- Two-stage scoring: deterministic heuristic first; LLM (default Claude Haiku) only on close-calls. Both contribute to the final `goal_relevance` Claim; both are recorded for replay.
+- Every engine-derived Claim (`progress_assessment`, `coverage_assessment`, `alignment_assessment`, `goal_relevance`) is grounded in a `DETECTION_RECORD` artifact in Layer A so decisions are auditable and replayable.
+- Active-view invariant: when a Goal is resolved, its still-active descendants are auto-resolved with `nature: obsoleted_by_parent`, preserving a coherent active-only view of the tree.
+- Never adjudicates: when conflicts are surfaced, the engine presents both sides with epistemic labels via a proposed action; the team resolves; the engine observes the resolution and updates scores.
 
 #### Test Plan
 
+See Module 6 spec for the full test plan. Coverage at the design level:
+
 | Test Category | What to Test | Approach |
 |---|---|---|
-| **Unit** | Work item tracker correctly scopes goal graph to team-owned items | Seed mixed-team work items; verify only team's items included |
-| **Unit** | Requirement alignment tracker extracts divergent understandings from transcript | Gold-standard transcripts with known disagreements -> expected flags |
-| **Unit** | Blocker detection fires when intra-team dependency conflict exists | Create two commitments with conflicting deadlines; verify alert |
-| **Unit** | Disagreement is surfaced to team, not resolved by engine | Inject contradiction; verify engine raises flag rather than picks a side |
-| **Integration** | Detected blocker produces a proposed action that routes through the Policy Engine, which evaluates and delivers it | Blocker detection -> proposed action -> Policy Engine evaluation (IN_SCOPE) -> connector delivery |
-| **Integration** | Goal brief (C artifact) correctly references all relevant A/B sources for the team's work | Generate brief; verify retrieval manifest completeness |
-| **Scenario** | Two team members have different understandings of what "done" means for a task. Engine detects the divergence, surfaces both understandings to the team with epistemic labels, and proposes a sync. | Requirement alignment scenario |
-| **Scenario** | A team dependency is at risk due to a conflicting commitment. Engine raises the risk to the team. Team resolves it. Engine does not escalate externally. | Intra-team blocker scenario |
+| **Unit** | Cascade resolution preserves active-view invariant | Resolve top-level Goal with active descendants; query `status: active`; verify no orphaned subtrees |
+| **Unit** | Heuristic scorer returns reproducible scores from documented features | Property-based test; same inputs → same score |
+| **Unit** | LLM tier-up triggered only when heuristic confidence below threshold | Mock heuristic outputs; verify tier-up boundary |
+| **Unit** | Silence logged with score; not duplicated within delta | Score below threshold; verify single audit entry |
+| **Integration** | Candidate enumeration → scoring → proposal end-to-end | Seed conflicting Claims; verify Policy receives proposal with score and DETECTION_RECORD ID in metadata |
+| **Integration** | Reactive recomputation on invalidation | Modify underlying Claim; verify only affected scores recomputed |
+| **Scenario** | "Get access to API X" worked example (see Module 6 §10) | Full flow from cross-team dependency detection to access granted to G3 resolved |
+| **Scenario** | Conflict on inactive subtree stays silent until subtree becomes active | Seed long-dormant conflict; activate dependent Goal; verify score crosses threshold and proposal fires |
 
 ---
 
@@ -811,14 +800,15 @@ Allow administrators to author policies, manage whitelists, tune thresholds, and
 1. Platform event arrives via Integration Layer
 2. Identity Engine resolves participants
 3. Event is ingested into Knowledge Store (Layer A)
-4. Extraction Pipeline updates Layer B (async)
-5. Team Goal Engine or Meeting Participation Engine evaluates whether an action is warranted and proposes it to the Policy Engine
-6. Policy & Governance Engine evaluates the proposed action
-7. Policy evaluation returns ALLOW, DENY, or REQUIRE_APPROVAL
-8. If REQUIRE_APPROVAL: Approval Module handles the NL approval flow and creates an AuthorizationRecord
-9. If ALLOW (or authorized): Outbound Gate applies any conditions (e.g., admin CC for out-of-scope communications)
-10. Action is dispatched via Integration Layer
-11. Every step is logged by Audit Layer
+4. Extraction Pipeline updates Layer B: Claims, `relates_to` edges, and any new Goal Entities (async)
+5. Knowledge Store emits invalidation events for the affected Claims/Entities
+6. Team Goal Engine reactively re-scores affected candidates (Stage 2); writes new `goal_relevance` Claim versions and `DETECTION_RECORD` artifacts. Meeting Participation Engine independently evaluates contribution opportunities for any active meetings
+7. Either engine may submit a proposed action to the Policy Engine via `submitAction()`
+8. Policy & Governance Engine evaluates the proposed action; verdict is ALLOW, DENY, or REQUIRE_APPROVAL
+9. If REQUIRE_APPROVAL: Approval Module handles the NL approval flow, creating an `OutreachRequest` (Layer B) and writing an `AUTHORIZATION_GRANTED`/`AUTHORIZATION_DENIED` artifact (Layer A) once resolved
+10. If ALLOW (or authorized): Outbound Gate applies any conditions (e.g., admin CC for out-of-scope communications)
+11. Action is dispatched via Integration Layer; an `OUTREACH_SENT` artifact is written to Layer A
+12. Every step is logged by Audit Layer; engine silence (candidates that scored below threshold) is also logged so the audit trail distinguishes "considered and declined" from "never noticed"
 
 ---
 

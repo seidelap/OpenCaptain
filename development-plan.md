@@ -138,23 +138,39 @@ Dependencies first, highest independent value early. Each phase ends with end-to
 
 ## Phase 6: Team Goal Engine (Module 6)
 
-**Scope:** Work item tracking, requirement alignment, blocker detection, action proposal.
+**Scope:** Three-stage decision engine over the unified `Goal` Entity tree — tree maintenance, candidate scoring (heuristic + LLM tier-up), action proposal.
+
+**Prerequisites in Module 4:** `Goal` Entity type, `decomposes_into` edge, `DETECTION_RECORD` artifact type, `subscribeInvalidations()` interface.
 
 **Deliverables:**
-- `syncWorkItems()` — team-scoped work item graph from Module 4 claims
-- `trackRequirementAlignment()` — per-task alignment status from B graph claims
-- `detectBlockers()` — all five blocker types
-- `decideAction()` — action decision logic for each blocker type with epistemic labels
-- `generateGoalBrief()` — Layer C context pack for team status
-- `handleTicketEvent()` — reactive updates from `TicketUpdated`/`TicketCreated` events
-- All telemetry pushed to Module 7 via `logEvent()`
+
+*Stage 1 — Tree Maintenance:*
+- `handleEvent()` — react to `TicketUpdated`/`TicketCreated`/`MessageReceived`/`DecisionRecorded`; reconcile structural edges with platform state
+- `propagateProgress()` — walk `decomposes_into` upward; write versioned `progress_assessment` Claims grounded in DETECTION_RECORD
+- `cascadeResolution()` — walk `decomposes_into` downward when a Goal is resolved; auto-resolve active descendants with `nature: obsoleted_by_parent` to preserve the active-view invariant
+- `mergeGoals()` — merge authored and extracted Goals via `same_as` when they refer to the same outcome
+
+*Stage 2 — Candidate Scoring:*
+- `enumerateCandidates()` — exhaustive enumeration of `clarify_conflict`, `coverage_gap`, `stale_dependency`, `cross_team_unblock`, `commitment_tension` candidates from the active goal tree
+- `scoreHeuristic()` — deterministic weighted-feature score with confidence
+- `scoreLLM()` — mini-model (Claude Haiku) tier-up on heuristic close-calls, using prompt caching for the static framework portion
+- `recordScore()` — write `goal_relevance` Claim + `DETECTION_RECORD` artifact; maintain reverse index for invalidation
+- `recomputeOnInvalidation()` — reactive re-scoring via `subscribeInvalidations()`
+
+*Stage 3 — Action Proposal:*
+- `proposeActions()` — `submitAction()` to Policy with score and DETECTION_RECORD ID in metadata
+- `logSilence()` — audit-log below-threshold candidates so silence is a recorded decision
+
+All telemetry pushed to Module 7 via `logEvent()`.
 
 **End-to-End Tests — Phase 6:**
-- Two team members each comment on a task with conflicting requirements (inserted as Layer A artifacts); verify Goal Engine detects REQUIREMENT_DISAGREEMENT and proposes a message surfacing both understandings through Policy Engine
-- Upstream dependency task marked at-risk; verify DEPENDENCY_AT_RISK blocker detected; verify proposed alert routed through Policy Engine
-- Goal Engine proposes out-of-scope contact for external dependency risk; verify Policy Engine returns REQUIRE_APPROVAL; verify no direct dispatch
-- Generate goal brief; verify it contains active blockers and at-risk items; verify all cited claims have `grounded_in` links
-- TicketUpdated event for task not assigned to team; verify Goal Engine ignores it; no state change
+- Cross-team unblock worked example (Module 6 §10): seed `decomposes_into` chain ending at a `cross_team_unblock` candidate; verify enumeration → scoring → proposal → Policy approval cycle → resolution detection on inbound reply → cascade to ancestors
+- Active-view invariant: resolve a top-level Goal with active descendants; query `status: active`; verify no orphaned subtrees
+- Reactive recomputation: score a candidate; modify an underlying Claim; verify only affected scores recomputed (not the whole tree)
+- Conflict on inactive subtree stays silent: seed long-dormant `relates_to` edge; activate dependent Goal; verify score crosses threshold and proposal fires
+- Authored vs. extracted merge: author a Goal; have extraction independently create a same-subject Goal; trigger `mergeGoals()`; verify single canonical Goal with combined `grounded_in` chain
+- Silence audit: candidate scored below threshold; verify single audit entry; subsequent below-threshold scores within delta do not duplicate
+- Heuristic-only mode (LLM tier-up disabled): all candidates scored on heuristic alone; confidence-flagged candidates still produce scores
 
 ---
 
